@@ -149,7 +149,7 @@ flow comes from RealSense depth moved by the camera and object motion measured b
 
 > **Labels need calibration that is not on the Hub yet** (camera extrinsics, event-camera
 > intrinsics, cubesat CAD and its marker transform). Until it is, label tasks raise
-> `MissingCalibrationError`. See [DATA_REQUIREMENTS.md](DATA_REQUIREMENTS.md) and run
+> `MissingCalibrationError`. See [DATA_REQUIREMENTS.md](https://github.com/ricard-inho/pooh-dataset/blob/main/DATA_REQUIREMENTS.md) and run
 > `pooh check`.
 
 ## Export to standard formats

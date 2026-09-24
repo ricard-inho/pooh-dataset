@@ -20,7 +20,7 @@ from .geometry import make_pose, max_monotonic_radius, project_points
 __all__ = ["CameraIntrinsics", "Calibration", "MissingCalibrationError", "parse_transform"]
 
 REQUIREMENTS_HINT = (
-    "See DATA_REQUIREMENTS.md in the pooh-dataset source repository for the calibration "
+    "See https://github.com/ricard-inho/pooh-dataset/blob/main/DATA_REQUIREMENTS.md for the calibration "
     "files the dataset needs to provide, and run `pooh check` to see what is missing."
 )
 RESERVED_KEYS = {"extrinsics", "time_offsets_ns"}

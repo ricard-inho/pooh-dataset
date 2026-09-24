@@ -44,6 +44,9 @@ viz = ["rerun-sdk>=0.38"]
 all = ["pooh-dataset[torch,mesh,viz,convert]"]
 
 [project.urls]
+Homepage = "https://github.com/ricard-inho/pooh-dataset"
+Issues = "https://github.com/ricard-inho/pooh-dataset/issues"
+Documentation = "https://github.com/ricard-inho/pooh-dataset#readme"
 Dataset = "https://huggingface.co/datasets/r3m3c3/off_test"
 
 [project.scripts]
