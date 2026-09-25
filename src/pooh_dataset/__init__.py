@@ -8,7 +8,7 @@ Quick start::
     frame = traj.frame("realsense_color", 0)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .calibration import Calibration, CameraIntrinsics, MissingCalibrationError
 from .dataset import PoohDataset
