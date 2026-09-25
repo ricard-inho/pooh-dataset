@@ -20,6 +20,8 @@ __all__ = [
     "project_points",
     "distort_normalized",
     "max_monotonic_radius",
+    "rotvec_to_rotmat",
+    "rotmat_to_rotvec",
 ]
 
 
@@ -216,3 +218,22 @@ def project_points(
     u = K[0, 0] * xy[:, 0] + K[0, 1] * xy[:, 1] + K[0, 2]
     v = K[1, 1] * xy[:, 1] + K[1, 2]
     return np.stack([u, v], axis=-1), valid
+
+
+def rotvec_to_rotmat(rv: np.ndarray) -> np.ndarray:
+    """Rodrigues: (3,) axis * angle -> (3, 3)."""
+    rv = np.asarray(rv, dtype=np.float64)
+    th = np.linalg.norm(rv)
+    if th < 1e-12:
+        return np.eye(3)
+    k = rv / th
+    Kx = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(th) * Kx + (1 - np.cos(th)) * Kx @ Kx
+
+
+def rotmat_to_rotvec(R: np.ndarray) -> np.ndarray:
+    q = rotmat_to_quat(R)
+    s = np.linalg.norm(q[:3])
+    if s < 1e-12:
+        return np.zeros(3)
+    return q[:3] / s * 2 * np.arctan2(s, q[3])

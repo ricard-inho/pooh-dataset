@@ -74,3 +74,12 @@ def test_cli(fake_root, capsys):
     assert main(["--root", str(fake_root), "check"]) == 0
     out = capsys.readouterr().out
     assert "trajectory_a" in out and "cubesat" in out
+
+
+def test_objects_limited_to_their_trajectories(ds):
+    ds.objects["cubesat"].trajectories = ["trajectory_b"]
+    assert PoseEstimation(ds, "train", camera="firefly").refs == []  # train = trajectory_a
+    task = PoseEstimation(ds, "all", camera="firefly")
+    assert {r.trajectory for r in task.refs} == {"trajectory_b"}
+    # flow still works in trajectory_a, with only background motion
+    assert len(OpticalFlow(ds, "train", camera="firefly")) == N_FRAMES - 1

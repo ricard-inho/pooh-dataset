@@ -32,6 +32,20 @@ class ObjectModel:
     mesh_path: Path | None = None
     #: BOP-style symmetries, passed through to exports untouched
     symmetries: dict | None = None
+    #: trajectories the object was physically present in (None = all)
+    trajectories: list[str] | None = None
+    #: (K, 3) model-frame points a person can click in images (e.g. cube corners); used by
+    #: `pooh calibrate`. Defaults to the corners of the mesh's bounding box.
+    keypoints: np.ndarray | None = None
+    #: Motive rigid-body export T_body_model was measured from (``pooh align-markers``), if any
+    motive_file: str | None = None
+
+    @property
+    def click_points(self) -> np.ndarray:
+        return self.corners if self.keypoints is None else self.keypoints
+
+    def present_in(self, trajectory: str) -> bool:
+        return self.trajectories is None or trajectory in self.trajectories
 
     @classmethod
     def from_box(cls, name: str, size_xyz, class_id: int = 1, mocap_body: str | None = None,
@@ -93,5 +107,10 @@ def load_object_models(models_dir: Path) -> dict[str, ObjectModel]:
         else:
             raise ValueError(f"models/objects.yaml: {name!r} needs either `mesh` or `box`")
         m.symmetries = d.get("symmetries")
+        m.motive_file = d.get("motive_file")
+        if d.get("keypoints") is not None:
+            m.keypoints = np.asarray(d["keypoints"], dtype=np.float64).reshape(-1, 3)
+        if d.get("trajectories") is not None:
+            m.trajectories = [str(t) for t in d["trajectories"]]
         out[name] = m
     return out

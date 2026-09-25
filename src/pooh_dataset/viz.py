@@ -64,8 +64,10 @@ def render_events(ev, height: int, width: int, scale: float = 1.0) -> np.ndarray
     return img
 
 
-def blueprint(traj: Trajectory | None = None) -> rrb.Blueprint:
-    has = (lambda m: traj.has(m)) if traj is not None else (lambda m: True)  # noqa: E731
+def blueprint(traj: Trajectory | None = None, modalities: list[str] | None = None) -> rrb.Blueprint:
+    def has(m: str) -> bool:
+        return (traj is None or traj.has(m)) and (modalities is None or m in modalities)
+
     cams = [rrb.Spatial2DView(origin=f"cams/{c}", name=c)
             for c in ("firefly", "realsense_color", "realsense_depth", "events") if has(c)]
     right = [rrb.Grid(*cams)] if cams else []
@@ -110,8 +112,18 @@ def log_trajectory(
     events_scale: float = 0.5,
     lidar_stride: int = 1,
     progress: bool = True,
+    objects: list | None = None,
+    labels: bool = True,
+    max_mask_pixels: int = 1_000_000,
 ) -> None:
-    """Log one trajectory into ``rec``. Only locally available modalities are logged."""
+    """Log one trajectory into ``rec``. Only locally available modalities are logged.
+
+    ``objects`` (e.g. ``list(dataset.objects.values())``) are drawn in the mocap world at
+    their mocap pose, through their ``T_body_model``: a quick visual check of that transform.
+    With ``labels``, every camera that has extrinsics also gets the ground truth drawn on its
+    images (box, cube wireframe, and the mask for cameras up to ``max_mask_pixels``), and its
+    frustum in the 3D view.
+    """
     mods = [m for m in (modalities or traj.modalities) if traj.has(m)]
     t0 = _t0(traj)
     lo = t0 + int(start_s * 1e9)
@@ -155,10 +167,20 @@ def log_trajectory(
             yaw = np.degrees(yaw_from_quat(quat))
             col = _color(body, i)
             rec.log(f"world/bodies/{body}", rr.TransformAxes3D(0.15), static=True)
-            rec.log(f"world/bodies/{body}/box", rr.Boxes3D(half_sizes=[0.08, 0.08, 0.04], colors=[col],
-                                                          labels=[body]), static=True)
+            if not any(o.mocap_body == body and o.present_in(traj.name) for o in objects or ()):
+                rec.log(f"world/bodies/{body}/box", rr.Boxes3D(half_sizes=[0.08, 0.08, 0.04], colors=[col],
+                                                              labels=[body]), static=True)
             rr.send_columns(f"world/bodies/{body}", indexes=tcol(ts),
                             columns=rr.Transform3D.columns(translation=pos, quaternion=quat), recording=rec)
+            for obj in objects or ():
+                if obj.mocap_body == body and obj.present_in(traj.name):
+                    T = obj.T_body_model
+                    rec.log(f"world/bodies/{body}/model", rr.Transform3D(translation=T[:3, 3], mat3x3=T[:3, :3]),
+                            static=True)
+                    rec.log(f"world/bodies/{body}/model/mesh", rr.Mesh3D(
+                        vertex_positions=obj.vertices, triangle_indices=obj.faces,
+                        albedo_factor=[*col, 160]), static=True)
+                    rec.log(f"world/bodies/{body}/model", rr.TransformAxes3D(0.08), static=True)
             rec.log(f"world/paths/{body}", rr.LineStrips3D([pos[::5]], colors=[col], radii=[0.004]), static=True)
             for axis, vals in (("x", pos[:, 0]), ("y", pos[:, 1]), ("yaw", yaw)):
                 rec.log(f"plots/{axis}/{body}", rr.SeriesLines(colors=[col], names=[body]), static=True)
@@ -222,13 +244,24 @@ def log_trajectory(
                 rr.send_columns(f"plots/imu/{name}", indexes=tcol(ts), columns=rr.Scalars.columns(scalars=vals),
                                 recording=rec)
 
+    objs_here = [o for o in objects or () if o.present_in(traj.name)
+                 and traj.has("mocap") and o.mocap_body in traj.mocap_bodies]
+    if labels and objs_here:
+        rec.log("cams", rr.AnnotationContext(
+            [rr.AnnotationInfo(id=o.class_id, label=o.name, color=_color(o.mocap_body, k))
+             for k, o in enumerate(objs_here)]), static=True)
     for cam, stride in (("firefly", firefly_stride), ("realsense_color", 1)):
         if cam in mods:
+            labeler = _labeler(traj, cam, objs_here, max_mask_pixels) if labels else None
+            if labeler is not None and "mocap" in mods:
+                _log_frustum(rec, traj, cam)
             ts = traj.timestamps(cam)
             idx = np.nonzero(window(ts))[0][::stride]
-            for i in step.iter(idx, cam):
+            for i in step.iter(idx, cam + (" + labels" if labeler else "")):
                 rec.set_time(TIMELINE, duration=secs(ts[i]))
                 rec.log(f"cams/{cam}", rr.EncodedImage(contents=traj.frame_bytes(cam, i), media_type="image/jpeg"))
+                if labeler is not None:
+                    labeler(rec, f"cams/{cam}", int(ts[i]))
 
     if "realsense_depth" in mods:
         ts = traj.timestamps("realsense_depth")
@@ -265,6 +298,68 @@ def log_trajectory(
             rec.set_time(TIMELINE, duration=secs(ts[i]))
             rec.log("lidar/points", rr.Points3D(pts[keep], colors=_turbo(inten), radii=[0.01]))
     step.done()
+
+
+#: edges of a box given as 8 corners in x-major product order (index = 4ix + 2iy + iz)
+_BOX_EDGES = [(a, b) for a in range(8) for b in range(a + 1, 8) if bin(a ^ b).count("1") == 1]
+
+
+def _labeler(traj: Trajectory, cam: str, objs: list, max_mask_pixels: int):
+    """Callable logging the ground truth of one frame, or None if the camera isn't calibrated."""
+    from .calibration import MissingCalibrationError
+    from .labels import mask_to_bbox, object_pose_in_camera, render_instances
+
+    if not objs:
+        return None
+    try:
+        intr = traj.calibration.intrinsics(cam)
+        traj.calibration.T_body_cam(cam)
+    except MissingCalibrationError:
+        return None
+    with_masks = intr.width * intr.height <= max_mask_pixels
+
+    def log(rec, path: str, t_ns: int) -> None:
+        items = []
+        for o in objs:
+            T, ok = object_pose_in_camera(traj, cam, o, t_ns)
+            if ok:
+                items.append((o, T))
+        inst, vis = render_instances(items, intr)
+        boxes, cls, names, strips = [], [], [], []
+        for (o, T), m in zip(items, vis):
+            box = mask_to_bbox(m)
+            if box is None:
+                continue
+            boxes.append(box)
+            cls.append(o.class_id)
+            names.append(o.name)
+            kp = o.click_points
+            if len(kp) == 8:
+                uv, okp = intr.project((T[:3, :3] @ kp.T).T + T[:3, 3])
+                strips += [uv[[a, b]] for a, b in _BOX_EDGES if okp[a] and okp[b]]
+        if not boxes:  # nothing in view: clear, or the last labels would linger on screen
+            rec.log(f"{path}/labels", rr.Clear(recursive=True))
+            return
+        rec.log(f"{path}/labels/boxes", rr.Boxes2D(array=np.array(boxes), array_format=rr.Box2DFormat.XYXY,
+                                                   class_ids=cls, labels=names))
+        rec.log(f"{path}/labels/wireframe", rr.LineStrips2D(strips, colors=[(255, 255, 255)], radii=[0.5]))
+        if with_masks:
+            seg = np.zeros(inst.shape, np.uint8)
+            for k, (o, _) in enumerate(items):
+                seg[inst == k + 1] = o.class_id
+            rec.log(f"{path}/labels/mask", rr.SegmentationImage(seg, opacity=0.45))
+
+    return log
+
+
+def _log_frustum(rec, traj: Trajectory, cam: str) -> None:
+    """Static camera frustum under its rig body, drawn in the 3D mocap view."""
+    cal = traj.calibration
+    intr, T = cal.intrinsics(cam), cal.T_body_cam(cam)
+    path = f"world/bodies/{cal.reference_body}/{cam}"
+    rec.log(path, rr.Transform3D(translation=T[:3, 3], mat3x3=T[:3, :3]), static=True)
+    rec.log(path, rr.Pinhole(image_from_camera=intr.K, resolution=[intr.width, intr.height],
+                             camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=0.15), static=True)
 
 
 def _info_text(traj: Trajectory) -> str:
@@ -307,6 +402,7 @@ def visualize(
     mode: str = "spawn",
     save_dir: str | None = None,
     web_port: int | None = None,
+    grpc_port: int | None = None,
     **log_kw,
 ) -> list[rr.RecordingStream]:
     """Log trajectories and show them.
@@ -320,7 +416,7 @@ def visualize(
     recs, url = [], None
     for traj in trajs:
         rec = rr.RecordingStream(APP_ID, recording_id=traj.name)
-        bp = blueprint(traj)
+        bp = blueprint(traj, log_kw.get("modalities"))
         if mode == "spawn":
             rec.spawn(default_blueprint=bp, memory_limit="75%")
         elif mode == "save":
@@ -329,8 +425,20 @@ def visualize(
             rec.save(out / f"{traj.name}.rrd", default_blueprint=bp)
         elif mode == "web":
             if url is None:
-                url = rec.serve_grpc(default_blueprint=bp, server_memory_limit="8GiB")
-                rr.serve_web_viewer(web_port=web_port, connect_to=url)
+                import os
+
+                url = rec.serve_grpc(grpc_port=grpc_port, default_blueprint=bp, server_memory_limit="8GiB")
+                wp = web_port or 9090
+                has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+                rr.serve_web_viewer(web_port=wp, connect_to=url, open_browser=has_display)
+                from urllib.parse import quote
+
+                gp = int(url.rsplit(":", 1)[1].split("/")[0])
+                # the viewer only knows where the data is through ?url=...; without it, it shows
+                # Rerun's landing page
+                page = f"http://localhost:{wp}/?url={quote(url.replace('127.0.0.1', 'localhost'), safe='')}"
+                print(f"\nopen this URL (the ?url=... part is required):\n  {page}")
+                print(f"  remote machine? first, on your laptop:  ssh -L {wp}:localhost:{wp} -L {gp}:localhost:{gp} <this host>\n")
             else:
                 rec.connect_grpc(url, default_blueprint=bp)
         else:

@@ -61,6 +61,6 @@ def test_viz_save(ds, tmp_path):
     img = render_events(ev, H, W, 0.5)
     assert img.shape == (H // 2, W // 2, 3)
     visualize([ds["trajectory_a"]], mode="save", save_dir=str(tmp_path), robot_body="SensorStack",
-              progress=False, events_fps=10)
+              progress=False, events_fps=10, objects=list(ds.objects.values()))
     rrd = tmp_path / "trajectory_a.rrd"
     assert rrd.exists() and rrd.stat().st_size > 10_000

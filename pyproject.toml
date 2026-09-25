@@ -37,11 +37,11 @@ dependencies = [
 torch = ["torch>=2.0"]
 # Loading CAD meshes (.ply/.obj/.stl) for mask / box rendering
 mesh = ["trimesh>=4.0"]
-# rosbag -> dataset conversion + upload (maintainers only)
-convert = ["rosbags>=0.9.19"]
 # Synchronized playback dashboard (pooh viz). Rerun's API moves fast: tested with 0.38.
 viz = ["rerun-sdk>=0.38"]
-all = ["pooh-dataset[torch,mesh,viz,convert]"]
+# pooh calibrate / align-markers (the click page itself needs nothing extra)
+calib = ["trimesh>=4.0"]
+all = ["pooh-dataset[torch,mesh,viz,calib]"]
 
 [project.urls]
 Homepage = "https://github.com/ricard-inho/pooh-dataset"

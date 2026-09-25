@@ -82,3 +82,14 @@ def test_missing_calibration_message(ds):
 def test_hash_split_stable():
     assert hash_split("trajectory_007") == hash_split("trajectory_007")
     assert {hash_split(f"t{i}") for i in range(100)} == {"train", "val", "test"}
+
+
+def test_fill_mask_holes():
+    from pooh_dataset.labels import fill_mask_holes
+
+    m = np.zeros((20, 30), bool)
+    m[3:15, 4:20] = True
+    m[6:9, 8:12] = False  # enclosed hole -> filled
+    m[10:15, 15:18] = False  # notch open to the outside -> kept
+    f = fill_mask_holes(m)
+    assert f[6:9, 8:12].all() and not f[12:15, 15:18].any() and f.sum() == m.sum() + 12

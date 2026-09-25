@@ -5,3 +5,6 @@ dist/
 build/
 .pytest_cache/
 .ruff_cache/
+
+# local outputs of `pooh calibrate` / `pooh align-markers`: the data belongs on the Hub
+pooh_calibration/

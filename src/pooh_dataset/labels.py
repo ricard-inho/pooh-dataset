@@ -21,6 +21,7 @@ __all__ = [
     "render_mask",
     "render_instances",
     "mask_to_bbox",
+    "fill_mask_holes",
     "projected_bbox",
 ]
 
@@ -72,12 +73,15 @@ def object_pose_in_camera(traj: Trajectory, camera: str, obj: ObjectModel, t_ns,
 # --------------------------------------------------------------- rendering
 
 
-def render_mask(obj: ObjectModel, T_cam_model: np.ndarray, intr: CameraIntrinsics) -> np.ndarray:
+def render_mask(obj: ObjectModel, T_cam_model: np.ndarray, intr: CameraIntrinsics,
+                fill_holes: bool = True) -> np.ndarray:
     """(H, W) bool silhouette of ``obj``: union of its projected triangles.
 
     Exact for a closed mesh as long as the object is fully in front of the camera; triangles
     with a vertex behind the camera (or outside the distortion model's valid radius) are
     dropped. Occlusion by *other* objects is handled by :func:`render_instances`.
+    ``fill_holes`` closes see-through gaps of hollow CAD shells (e.g. mounting holes that
+    line up), which the real, covered object does not have.
     """
     if not np.all(np.isfinite(T_cam_model)):
         return np.zeros((intr.height, intr.width), bool)
@@ -90,7 +94,33 @@ def render_mask(obj: ObjectModel, T_cam_model: np.ndarray, intr: CameraIntrinsic
     draw = ImageDraw.Draw(img)
     for tri in uv[obj.faces[tri_ok]]:
         draw.polygon([tuple(p) for p in tri], fill=1)
-    return np.asarray(img, dtype=bool)
+    mask = np.asarray(img, dtype=bool)
+    return fill_mask_holes(mask) if fill_holes else mask
+
+
+def fill_mask_holes(mask: np.ndarray) -> np.ndarray:
+    """Fill background regions not connected to the outside of the mask's bounding box."""
+    ys, xs = np.nonzero(mask)
+    if len(ys) == 0:
+        return mask
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    m = np.pad(mask[y0:y1, x0:x1], 1)  # 1-px background ring: the "outside"
+    outside = np.zeros_like(m)
+    outside[0, :] = outside[-1, :] = outside[:, 0] = outside[:, -1] = True
+    free = ~m
+    for _ in range(m.shape[0] * m.shape[1]):  # flood by dilation; converges in a few dozen steps
+        grown = outside.copy()
+        grown[1:] |= outside[:-1]
+        grown[:-1] |= outside[1:]
+        grown[:, 1:] |= outside[:, :-1]
+        grown[:, :-1] |= outside[:, 1:]
+        grown &= free
+        if np.array_equal(grown, outside):
+            break
+        outside = grown
+    out = mask.copy()
+    out[y0:y1, x0:x1] = ~outside[1:-1, 1:-1]
+    return out
 
 
 def render_instances(

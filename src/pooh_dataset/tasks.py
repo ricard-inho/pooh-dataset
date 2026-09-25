@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .calibration import MissingCalibrationError
 from .dataset import PoohDataset
 from .events import voxel_grid
 from .flow import optical_flow
@@ -84,15 +83,22 @@ class _FrameTask:
             self._views[traj.name] = CameraView(intr, self.undistort, self.image_size)
         return self._views[traj.name]
 
+    def objects_in(self, traj: Trajectory) -> list[ObjectModel]:
+        """The task's objects that were present (listed and tracked) in ``traj``."""
+        bodies = set(traj.mocap_bodies) if traj.has("mocap") else set()
+        return [o for o in self.objects if o.present_in(traj.name) and o.mocap_body in bodies]
+
     def _index_trajectory(self, traj: Trajectory, require_visible: bool) -> list[FrameRef]:
         ts = traj.timestamps(self._index_modality)
         idx = np.arange(0, len(ts), self.stride)
-        if require_visible and self.objects:
+        if require_visible and self.needs_objects and not self.objects_in(traj):
+            return []  # none of the requested objects were in this recording
+        if require_visible and self.objects_in(traj):
             keep = np.zeros(len(idx), bool)
             intr = self.view(traj).intrinsics
             T_wc, ok_c = camera_pose(traj, self.camera, ts[idx], self.max_gap_ns)
             T_cw = invert_pose(T_wc)
-            for obj in self.objects:
+            for obj in self.objects_in(traj):
                 T_wo, ok_o = object_pose(traj, obj, ts[idx], self.max_gap_ns)
                 T_co = T_cw @ T_wo
                 for k in np.nonzero(ok_c & ok_o)[0]:
@@ -118,7 +124,7 @@ class _FrameTask:
 
     def _poses(self, traj: Trajectory, ref: FrameRef):
         T, ok = [], []
-        for obj in self.objects:
+        for obj in self.objects_in(traj):
             T_co, v = object_pose_in_camera(traj, ref.camera, obj, ref.t_ns, self.max_gap_ns)
             T.append(T_co)
             ok.append(bool(v))
@@ -141,8 +147,9 @@ class PoseEstimation(_FrameTask):
         ref = self.refs[i]
         traj, s = self._base(ref)
         s["poses"], s["valid"] = self._poses(traj, ref)
-        s["object_ids"] = np.array([o.class_id for o in self.objects], np.int64)
-        s["names"] = [o.name for o in self.objects]
+        objs = self.objects_in(traj)
+        s["object_ids"] = np.array([o.class_id for o in objs], np.int64)
+        s["names"] = [o.name for o in objs]
         return s
 
 
@@ -162,7 +169,7 @@ class ObjectDetection(_FrameTask):
     def _labels(self, traj: Trajectory, ref: FrameRef, s: dict) -> dict:
         poses, valid = self._poses(traj, ref)
         intr = self.view(traj).intrinsics
-        items = [(o, T) for o, T, v in zip(self.objects, poses, valid) if v]
+        items = [(o, T) for o, T, v in zip(self.objects_in(traj), poses, valid) if v]
         inst, vis = render_instances(items, intr)
         boxes, labels, masks, names, kept_poses = [], [], [], [], []
         for (obj, T), m in zip(items, vis):
@@ -266,24 +273,8 @@ class OpticalFlow(_FrameTask):
                 "image1": view(traj.frame(self.camera, j), nearest),
             }
             depth_index = ref.index if self.camera == "realsense_depth" else None
-        flow, valid = optical_flow(traj, self.camera, t0, t1, self.objects,
+        flow, valid = optical_flow(traj, self.camera, t0, t1, self.objects_in(traj),
                                    depth_index=depth_index, intr=view.intrinsics)
         s.update(flow=flow, valid=valid, K=view.intrinsics.K.copy(), trajectory=ref.trajectory,
                  camera=self.camera, t0_ns=t0, t1_ns=t1)
         return s
-
-
-def check_task_ready(dataset: PoohDataset, camera: str, need_objects: bool) -> list[str]:
-    """Human-readable list of what is missing to build labels for ``camera``."""
-    problems = []
-    if need_objects and not dataset.objects:
-        problems.append("models/objects.yaml (+ CAD mesh) missing")
-    for t in dataset.local_trajectory_names:
-        cal = dataset[t].calibration
-        for what, fn in (("intrinsics", cal.intrinsics), ("extrinsics", cal.T_body_cam)):
-            try:
-                fn(camera)
-            except MissingCalibrationError:
-                problems.append(f"{t}: {camera} {what} missing")
-    return problems
-
