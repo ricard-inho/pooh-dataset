@@ -205,6 +205,11 @@ hash of the trajectory name and prints a warning. Add new trajectories to the fi
 they are uploaded, and never move old ones between splits. Bump `version` whenever the
 file changes, so results can cite it.
 
+The file covers the simulated trajectories too (they are split by the same hash until they are
+listed). The `splits` key of `manifest.json` (the real converter's `--split`) and the
+simulation scenarios are the *Hub viewer's* splits: they group the data for browsing and are
+exposed as `ds.hub_splits`, not used for training.
+
 ## 10. Trajectory metadata — `manifest.json`
 
 Add an optional `trajectory_info` block next to the existing `trajectories` counts:
@@ -216,10 +221,14 @@ Add an optional `trajectory_info` block next to the existing `trajectories` coun
 }
 ```
 
-`domain` lets people filter (`ds.split("train", domain="synthetic")`). Synthetic trajectories
-should use the **same layout** (`<modality>/<trajectory>/*.parquet`, same columns, a
-calibration YAML, mocap-equivalent GT poses in a `mocap` table); then every tool in the
-package works on them unchanged.
+`domain` lets people filter (`ds.split("train", domain="synthetic")`).
+
+The simulation pipeline does not use this block: its trajectories are listed in
+`sim_manifest.json` (group, scenario, counts, goal errors) and stored as
+`sim_<group>_<modality>/<trajectory>/*.parquet`, with `calibration/<trajectory>.yaml` in the
+simulation format (`T_base_sensor` per sensor) and `metadata/<trajectory>.yaml`. The package
+reads both (domain `synthetic`, or `sim_3d` / `sim_zerog`). Every table also has a
+`trajectory_id` column, which the readers drop.
 
 ---
 

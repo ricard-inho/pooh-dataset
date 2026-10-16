@@ -23,7 +23,7 @@ except ImportError as e:  # pragma: no cover
 
 from .events import EVENT_SENSOR_SIZE, event_histogram
 from .quality import GOAL_TOPIC, ROBOT_BODY, yaw_from_quat
-from .trajectory import Trajectory
+from .trajectory import DEPTH_MODALITIES, Trajectory
 
 __all__ = ["log_trajectory", "blueprint", "render_events", "visualize"]
 
@@ -52,6 +52,10 @@ def _turbo(v: np.ndarray) -> np.ndarray:
     return (np.clip(powers @ c.T, 0, 1) * 255).astype(np.uint8)
 
 
+def _media_type(data: bytes) -> str:
+    return "image/png" if data[:4] == b"\x89PNG" else "image/jpeg"
+
+
 def render_events(ev, height: int, width: int, scale: float = 1.0) -> np.ndarray:
     """(h, w, 3) uint8 frame: dark background, blue = positive, red = negative polarity."""
     h, w = max(1, int(height * scale)), max(1, int(width * scale))
@@ -69,10 +73,11 @@ def blueprint(traj: Trajectory | None = None, modalities: list[str] | None = Non
         return (traj is None or traj.has(m)) and (modalities is None or m in modalities)
 
     cams = [rrb.Spatial2DView(origin=f"cams/{c}", name=c)
-            for c in ("firefly", "realsense_color", "realsense_depth", "events") if has(c)]
+            for c in ("firefly", "realsense_color", "realsense_depth", "rgb", "depth", "semantic", "events")
+            if has(c)]
     right = [rrb.Grid(*cams)] if cams else []
     if has("lidar"):
-        right.append(rrb.Spatial3DView(origin="lidar", name="Livox Mid-360"))
+        right.append(rrb.Spatial3DView(origin="lidar", name="lidar"))
     plots_right = []
     if has("robot_messages"):
         plots_right.append(rrb.TimeSeriesView(origin="plots/actions", name="thrusters / reaction wheel"))
@@ -250,7 +255,7 @@ def log_trajectory(
         rec.log("cams", rr.AnnotationContext(
             [rr.AnnotationInfo(id=o.class_id, label=o.name, color=_color(o.mocap_body, k))
              for k, o in enumerate(objs_here)]), static=True)
-    for cam, stride in (("firefly", firefly_stride), ("realsense_color", 1)):
+    for cam, stride in (("firefly", firefly_stride), ("realsense_color", 1), ("rgb", 1)):
         if cam in mods:
             labeler = _labeler(traj, cam, objs_here, max_mask_pixels) if labels else None
             if labeler is not None and "mocap" in mods:
@@ -259,19 +264,30 @@ def log_trajectory(
             idx = np.nonzero(window(ts))[0][::stride]
             for i in step.iter(idx, cam + (" + labels" if labeler else "")):
                 rec.set_time(TIMELINE, duration=secs(ts[i]))
-                rec.log(f"cams/{cam}", rr.EncodedImage(contents=traj.frame_bytes(cam, i), media_type="image/jpeg"))
+                data = traj.frame_bytes(cam, i)
+                rec.log(f"cams/{cam}", rr.EncodedImage(contents=data, media_type=_media_type(data)))
                 if labeler is not None:
                     labeler(rec, f"cams/{cam}", int(ts[i]))
 
-    if "realsense_depth" in mods:
-        ts = traj.timestamps("realsense_depth")
-        intr = traj.calibration.cameras.get("realsense_depth")
+    for dm in DEPTH_MODALITIES:
+        if dm not in mods:
+            continue
+        ts = traj.timestamps(dm)
+        intr = traj.calibration.cameras.get(dm)
         meter = 1.0 / (intr.depth_scale if intr is not None and intr.depth_scale else 0.001)
-        for i in step.iter(np.nonzero(window(ts))[0], "realsense_depth"):
+        for i in step.iter(np.nonzero(window(ts))[0], dm):
             rec.set_time(TIMELINE, duration=secs(ts[i]))
-            rec.log("cams/realsense_depth", rr.EncodedDepthImage(traj.frame_bytes("realsense_depth", i),
-                                                                 media_type="image/png", meter=meter,
-                                                                 colormap="turbo"))
+            rec.log(f"cams/{dm}", rr.EncodedDepthImage(traj.frame_bytes(dm, i), media_type="image/png",
+                                                       meter=meter, colormap="turbo"))
+
+    if "semantic" in mods:
+        classes = traj.semantic_classes
+        rec.log("cams/semantic", rr.AnnotationContext(
+            [rr.AnnotationInfo(id=v, label=k) for k, v in classes.items()]), static=True)
+        ts = traj.timestamps("semantic")
+        for i in step.iter(np.nonzero(window(ts))[0], "semantic"):
+            rec.set_time(TIMELINE, duration=secs(ts[i]))
+            rec.log("cams/semantic", rr.SegmentationImage(traj.frame("semantic", i)))
 
     if "events" in mods:
         ev_lo, ev_hi = traj.time_range("events")
@@ -294,7 +310,11 @@ def log_trajectory(
             s = traj.lidar_scan(i)
             pts = np.stack([s["x"], s["y"], s["z"]], -1)
             keep = np.isfinite(pts).all(1) & (np.abs(pts).sum(1) > 0)
-            inten = np.log1p(np.asarray(s["intensity"], float)[keep]) / np.log1p(255.0)
+            if "intensity" in s:
+                inten = np.log1p(np.asarray(s["intensity"], float)[keep]) / np.log1p(255.0)
+            else:  # simulated: colour by range
+                r = np.linalg.norm(pts[keep], axis=1)
+                inten = r / max(float(r.max(initial=0)), 1e-6)
             rec.set_time(TIMELINE, duration=secs(ts[i]))
             rec.log("lidar/points", rr.Points3D(pts[keep], colors=_turbo(inten), radii=[0.01]))
     step.done()

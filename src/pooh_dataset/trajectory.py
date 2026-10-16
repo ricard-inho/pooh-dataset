@@ -13,29 +13,39 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pads
 import pyarrow.parquet as pq
+import yaml
 from PIL import Image
 
 from .calibration import Calibration
 from .events import Events
 from .geometry import interpolate_poses
 
-__all__ = ["Trajectory", "IMAGE_MODALITIES", "CAMERAS"]
+__all__ = ["Trajectory", "IMAGE_MODALITIES", "SIM_IMAGE_MODALITIES", "DEPTH_MODALITIES", "CAMERAS"]
 
 IMAGE_MODALITIES = ("firefly", "realsense_color", "realsense_depth")
+#: simulated camera (one pinhole camera, pixel-aligned with the simulated event camera)
+SIM_IMAGE_MODALITIES = ("rgb", "depth", "semantic")
+DEPTH_MODALITIES = ("realsense_depth", "depth")
 #: every sensor that has intrinsics / can be a label target
-CAMERAS = IMAGE_MODALITIES + ("events",)
+CAMERAS = IMAGE_MODALITIES + SIM_IMAGE_MODALITIES + ("events",)
+#: on-disk column holding the trajectory name in every table; dropped from the readers' output
+TRAJECTORY_ID = "trajectory_id"
 
 
 class Trajectory:
     """One recording session. Timestamps are only comparable within a trajectory.
 
     Data is read straight from the Parquet shards; nothing is loaded until asked for.
+    Simulated trajectories live in ``<prefix><modality>/<name>/`` (prefix ``sim_3d_`` or
+    ``sim_zerog_``); modalities are named without the prefix (``rgb``, ``depth``, ...).
     """
 
-    def __init__(self, root: Path, name: str, info: dict | None = None, row_group_cache: int = 2):
+    def __init__(self, root: Path, name: str, info: dict | None = None, row_group_cache: int = 2,
+                 prefix: str = ""):
         self.root = Path(root)
         self.name = name
         self.info = info or {}
+        self.prefix = prefix
         self._rg_cache: OrderedDict = OrderedDict()
         self._rg_cache_size = row_group_cache
         self._pf_cache: dict[Path, pq.ParquetFile] = {}
@@ -47,15 +57,35 @@ class Trajectory:
 
     # ------------------------------------------------------------------ files
 
+    @property
+    def domain(self) -> str:
+        return self.info.get("domain", "real")
+
+    @property
+    def simulated(self) -> bool:
+        """Recorded by the simulation pipeline (``sim_*`` folders on the Hub, or a local
+        conversion with a ``scenario``). Not the same as ``domain == "synthetic"``, which
+        trajectories in the real layout may also be marked with."""
+        return bool(self.prefix) or "scenario" in self.info
+
+    def folder(self, modality: str) -> Path:
+        return self.root / f"{self.prefix}{modality}" / self.name
+
     def files(self, modality: str) -> list[Path]:
-        return sorted((self.root / modality / self.name).glob("*.parquet"))
+        return sorted(self.folder(modality).glob("*.parquet"))
 
     @cached_property
     def modalities(self) -> list[str]:
         return sorted(
-            p.name for p in self.root.iterdir()
-            if p.is_dir() and (p / self.name).is_dir() and any((p / self.name).glob("*.parquet"))
+            p.name[len(self.prefix):] for p in self.root.iterdir()
+            if p.is_dir() and p.name.startswith(self.prefix)
+            and (p / self.name).is_dir() and any((p / self.name).glob("*.parquet"))
         )
+
+    @property
+    def depth_modality(self) -> str | None:
+        """The depth camera of this trajectory (``realsense_depth`` or simulated ``depth``)."""
+        return next((m for m in DEPTH_MODALITIES if self.has(m)), None)
 
     def has(self, modality: str) -> bool:
         return modality in self.modalities
@@ -64,7 +94,7 @@ class Trajectory:
         files = self.files(modality)
         if not files:
             raise FileNotFoundError(
-                f"[{self.name}] no local data for {modality!r} under {self.root / modality / self.name}. "
+                f"[{self.name}] no local data for {modality!r} under {self.folder(modality)}. "
                 f"Download it with `pooh download --trajectory {self.name} --modality {modality}`."
             )
         return files
@@ -80,6 +110,10 @@ class Trajectory:
     def table(self, modality: str, columns: list[str] | None = None, filter=None) -> pa.Table:
         """Read (a projection / filter of) a modality as one Arrow table."""
         return self.dataset(modality).to_table(columns=columns, filter=filter)
+
+    def columns(self, modality: str) -> list[str]:
+        """Column names of a modality, without the ``trajectory_id`` bookkeeping column."""
+        return [c for c in self.dataset(modality).schema.names if c != TRAJECTORY_ID]
 
     @cached_property
     def calibration(self) -> Calibration:
@@ -158,8 +192,10 @@ class Trajectory:
         """Decoded frame: (H, W, 3) uint8 RGB, or (H, W) uint16 raw depth."""
         return np.asarray(Image.open(io.BytesIO(self.frame_bytes(modality, index))))
 
-    def depth(self, index: int, modality: str = "realsense_depth") -> np.ndarray:
-        """Depth frame in metres (float32, 0 = no measurement)."""
+    def depth(self, index: int, modality: str | None = None) -> np.ndarray:
+        """Depth frame in metres (float32, 0 = no measurement). ``modality`` defaults to the
+        trajectory's depth camera (:attr:`depth_modality`)."""
+        modality = modality or self.depth_modality or DEPTH_MODALITIES[0]
         scale = self.calibration.cameras.get(modality)
         s = scale.depth_scale if scale is not None and scale.depth_scale else 0.001
         return self.frame(modality, index).astype(np.float32) * np.float32(s)
@@ -179,7 +215,7 @@ class Trajectory:
         flt = (pc.field("t") >= pa.scalar(int(t_start_ns) - off, pa.int64())) & (
             pc.field("t") < pa.scalar(int(t_end_ns) - off, pa.int64())
         )
-        tab = self.table("events", filter=flt)
+        tab = self.table("events", columns=["t", "x", "y", "p"], filter=flt)
         if tab.num_rows == 0:
             return Events.empty()
         t, x, y, p = (tab.column(c).to_numpy() for c in ("t", "x", "y", "p"))
@@ -189,7 +225,7 @@ class Trajectory:
 
     @cached_property
     def _mocap(self) -> dict[str, dict[str, np.ndarray]]:
-        tab = self.table("mocap")
+        tab = self.table("mocap", columns=["body", "timestamp_ns", "x", "y", "z", "qx", "qy", "qz", "qw"])
         body = tab.column("body").to_numpy(zero_copy_only=False)
         cols = {c: tab.column(c).to_numpy() for c in ("timestamp_ns", "x", "y", "z", "qx", "qy", "qz", "qw")}
         cols["timestamp_ns"] = cols["timestamp_ns"] + self.calibration.time_offset_ns("mocap")
@@ -218,17 +254,65 @@ class Trajectory:
         return interpolate_poses(m["timestamp_ns"], pos, quat, t_ns, max_gap_ns=max_gap_ns)
 
     def imu(self) -> dict[str, np.ndarray]:
-        """IMU samples as column arrays. Linear acceleration is in g (Livox driver unit)."""
-        tab = self.table("imu")
+        """IMU samples as column arrays. Linear acceleration is in g for real data (Livox
+        driver unit) and in m/s^2 for simulated data."""
+        tab = self.table("imu", columns=self.columns("imu"))
         return {c: tab.column(c).to_numpy() for c in tab.column_names}
 
     # ----------------------------------------------------------------- lidar
 
     def lidar_scan(self, index: int) -> dict[str, np.ndarray]:
-        """One Mid-360 scan: arrays x, y, z, intensity, tag, line, timestamp + scalars."""
+        """One scan: arrays x, y, z, ... + scalars. Real (Mid-360): intensity, tag, line,
+        timestamp; simulated: distance, channel, with points in the sensor frame."""
         path, rg, off = self._locate("lidar", index)
-        row = self._parquet(path).read_row_group(rg).slice(off, 1).to_pylist()[0]
+        cols = [c for c in self._parquet(path).schema_arrow.names if c != TRAJECTORY_ID]
+        row = self._parquet(path).read_row_group(rg, columns=cols).slice(off, 1).to_pylist()[0]
         return {k: (np.asarray(v) if isinstance(v, list) else v) for k, v in row.items()}
+
+    # ------------------------------------------------------------ simulation
+
+    def steps(self) -> dict[str, np.ndarray]:
+        """Simulated policy steps (agent rate) as column arrays: ``timestamp_ns``, ``step``,
+        ``action`` (N, A), ``observation`` (N, O), ``reward``, ``reward_terms`` (N, R),
+        ``goal_position_error``, ``goal_orientation_error``, ``terminated``, ``truncated``, and
+        ``task_state`` (JSON strings). Term names are in :attr:`metadata`."""
+        tab = self.table("steps", columns=self.columns("steps"))
+        out = {}
+        for c in tab.column_names:
+            col = tab.column(c)
+            if pa.types.is_list(col.type):
+                out[c] = np.asarray(col.to_pylist(), dtype=np.float64)
+            else:
+                out[c] = col.to_numpy()
+        return out
+
+    def joint_states(self, articulation: str) -> dict[str, np.ndarray]:
+        """Simulated joint states of one articulation (``robot``, ``arm_wall``, ...):
+        ``timestamp_ns`` and (N, J) ``position``, ``velocity``, ``effort``. Joint names are in
+        ``metadata["articulations"]``."""
+        tab = self.table("joint_states", columns=["timestamp_ns", "position", "velocity", "effort"],
+                         filter=pc.field("articulation") == articulation)
+        if tab.num_rows == 0:
+            raise KeyError(f"[{self.name}] no joint states for articulation {articulation!r}")
+        tab = tab.sort_by("timestamp_ns")
+        out = {"timestamp_ns": tab.column("timestamp_ns").to_numpy()}
+        for c in ("position", "velocity", "effort"):
+            out[c] = np.asarray(tab.column(c).to_pylist(), dtype=np.float64)
+        return out
+
+    @cached_property
+    def metadata(self) -> dict:
+        """``metadata/<trajectory>.yaml`` of a simulated trajectory: scenario, rates, frames and
+        units, semantic classes, observation / reward term layout ({} for real data)."""
+        path = self.root / "metadata" / f"{self.name}.yaml"
+        if not path.exists():
+            return {}
+        return yaml.safe_load(path.read_text()) or {}
+
+    @property
+    def semantic_classes(self) -> dict[str, int]:
+        """Class name -> id of the simulated ``semantic`` images (e.g. ``target``: 2)."""
+        return dict(self.metadata.get("semantic_classes", {}))
 
     # -------------------------------------------------------------- messages
 

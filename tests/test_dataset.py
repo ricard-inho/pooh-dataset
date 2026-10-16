@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from conftest import FRAME_DT, N_FRAMES, SPEED, T0, H, W
+from conftest import FRAME_DT, N_FRAMES, SIM_TRAJ, SPEED, T0, H, W
 
 from pooh_dataset import MissingCalibrationError
 from pooh_dataset.events import event_histogram, time_surface, voxel_grid
@@ -14,11 +14,13 @@ from pooh_dataset.splits import hash_split
 
 
 def test_structure(ds):
-    assert ds.trajectory_names == ["trajectory_a", "trajectory_b"]
+    assert ds.trajectory_names == ["trajectory_a", "trajectory_b", SIM_TRAJ]
     traj = ds["trajectory_a"]
     assert "firefly" in traj.modalities and "events" in traj.modalities
+    assert "rgb" not in traj.modalities  # simulated folders are not real modalities
     assert ds.split("train") == ["trajectory_a"]
-    assert ds.split("all", domain="synthetic") == ["trajectory_b"]
+    assert ds.split("all", domain="real") == ["trajectory_a"]
+    assert ds.split("all", domain="synthetic") == ["trajectory_b", SIM_TRAJ]
     assert ds.trajectory_info("trajectory_a")["domain"] == "real"
 
 

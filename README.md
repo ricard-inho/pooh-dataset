@@ -11,6 +11,12 @@ depth), a Livox Mid-360 lidar + IMU, OptiTrack motion capture (`SensorStack`, `c
 `floatingplatform`), and the robot's control / observation topics. All streams in a trajectory
 share one clock.
 
+The same repo also holds **simulated** trajectories recorded in
+[Space Robotics Bench](https://github.com/snt-spacer/space_robotics_bench): orbital inspection
+(`sim_3d`: ISS, Gateway, CubeSat, ... ) and a twin of the Zero-G lab (`sim_zerog`), each with
+RGB, depth, semantic labels, emulated events, lidar, IMU, ground-truth poses and the policy's
+steps. See [Simulated data](#simulated-data).
+
 ## Install
 
 ```bash
@@ -36,13 +42,17 @@ Data is large (≈ 11 GB per trajectory, mostly Firefly frames), so download onl
 need. Downloads resume, and a rerun only fetches files that are new on the Hub.
 
 ```bash
-pooh download                                  # everything
+pooh download                                  # all real data
 pooh download -m mocap -m realsense_color -m realsense_depth
 pooh download -t trajectory_007 -m events
+pooh download --domain sim_3d -m rgb -m mocap  # simulated: synthetic, sim_3d, sim_zerog; all = both
 pooh download --revision <commit-sha>          # pin a dataset version for a paper
 pooh info                                      # what is local / remote, splits
 pooh check                                     # which calibration / CAD inputs exist
 ```
+
+Without `-t`, `--domain` picks what is downloaded (default `real`). With `-t`, the named
+trajectories are downloaded whatever their domain.
 
 The default location is `~/.cache/pooh_dataset/<repo>`. Override it with `--root` or
 `$POOH_DATA_DIR`, and point at another repo with `--repo` / `$POOH_REPO_ID`.
@@ -217,6 +227,50 @@ flow comes from RealSense depth moved by the camera and object motion measured b
 > camera (trajectories 007–009). Other cameras raise `MissingCalibrationError` until they are
 > calibrated (see "Calibrate" above). Run `pooh check` for the current status and see
 > [DATA_REQUIREMENTS.md](https://github.com/ricard-inho/pooh-dataset/blob/main/DATA_REQUIREMENTS.md).
+
+## Simulated data
+
+Simulated trajectories are named `trajectory_<tag>_<n>` and stored on the Hub as
+`sim_3d_<modality>/<trajectory>/` and `sim_zerog_<modality>/<trajectory>/`. The library hides
+the prefix: they are read like the real ones, with their own modality names.
+
+| modality | content |
+|---|---|
+| `rgb`, `depth`, `semantic` | one pinhole camera (320 x 240, 20 Hz); depth in metres via `traj.depth(i)`; semantic class ids, names in `traj.semantic_classes` (`target` = 2) |
+| `events` | emulated IMX636 events, pixel-aligned with the camera |
+| `lidar` | scans in the sensor frame (`x`, `y`, `z`, `distance`, `channel`) |
+| `mocap` | ground-truth poses: `robot`, `target`, `goal`, `camera` (+ `arm_end_effector` in the lab) |
+| `imu` | robot IMU (linear acceleration in m/s^2, not g) |
+| `joint_states` | lab: floating platform and arm joints (`traj.joint_states("arm_wall")`) |
+| `steps` | policy steps at 10 Hz: action, observation, rewards, goal errors (`traj.steps()`) |
+
+```python
+from pooh_dataset import PoohDataset
+from pooh_dataset.labels import camera_pose
+
+ds = PoohDataset.download(domain="sim_3d", modalities=["rgb", "depth", "semantic", "mocap"])
+ds.scenarios()                         # {"orbital/iss/earth": [...], ...}
+ds.split("train", domain="sim_3d")     # train / val / test by trajectory, like the real data
+
+traj = ds[ds.scenarios()["orbital/iss/earth"][0]]
+traj.info                              # group, scenario, duration_s, goal errors, counts
+traj.metadata                          # scenario parameters, rates, frames and units, term names
+rgb, sem = traj.frame("rgb", 0), traj.frame("semantic", 0)
+target_mask = sem == traj.semantic_classes["target"]
+T_world_cam, ok = camera_pose(traj, "rgb", traj.timestamps("rgb")[0])
+```
+
+Calibration comes from the simulation (`calibration/<trajectory>.yaml`): intrinsics, and each
+sensor's mount on the robot base, read as extrinsics on the `robot` mocap body (cameras in
+their optical frame). So `pooh_dataset.labels.camera_pose`, `traj.body_pose("target", t)` and
+`OpticalFlow(ds, ..., camera="rgb" | "events")` work as for the real data. The object tasks
+(`PoseEstimation`, `ObjectDetection`, `Segmentation`) need a CAD model in
+`models/objects.yaml` and are real-data only; in simulation, the `semantic` images give the
+masks and the `target` mocap body the pose.
+
+Domains in `ds.split(..., domain=...)`: `real`, `synthetic` (all simulated), `sim_3d`,
+`sim_zerog`. `ds.hub_splits` gives the splits shown by the Hub viewer (simulation scenarios and
+groups of real trajectories); they organise the data and are not train / test splits.
 
 ## Export to standard formats
 

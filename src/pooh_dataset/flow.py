@@ -1,6 +1,6 @@
 """Optical-flow ground truth from depth + mocap.
 
-Scene points are back-projected from a RealSense depth frame, moved with the world (static
+Scene points are back-projected from a depth frame (RealSense, or the simulated depth camera), moved with the world (static
 background) or with the tracked object they belong to, and projected into the target camera
 at ``t0`` and ``t1``. The difference of the two projections is the flow. This works for any
 calibrated camera, including the event camera (flow between ``t0`` and ``t1`` for the events
@@ -76,7 +76,7 @@ def optical_flow(
     t0_ns: int,
     t1_ns: int,
     objects: list[ObjectModel] = (),
-    depth_modality: str = "realsense_depth",
+    depth_modality: str | None = None,
     depth_index: int | None = None,
     intr: CameraIntrinsics | None = None,
     depth_tolerance_ns: int = 50_000_000,
@@ -84,8 +84,11 @@ def optical_flow(
     """Dense flow GT for ``camera`` from ``t0_ns`` to ``t1_ns``.
 
     ``intr`` overrides the camera's intrinsics (e.g. an undistorted / resized
-    :class:`~pooh_dataset.imaging.CameraView`). Returns ``(flow, valid)``.
+    :class:`~pooh_dataset.imaging.CameraView`). ``depth_modality`` defaults to the
+    trajectory's depth camera (``realsense_depth``, or ``depth`` in simulation). Returns
+    ``(flow, valid)``.
     """
+    depth_modality = depth_modality or traj.depth_modality or "realsense_depth"
     intr = intr or traj.calibration.intrinsics(camera)
     d_intr = traj.calibration.intrinsics(depth_modality)
     if depth_index is None:

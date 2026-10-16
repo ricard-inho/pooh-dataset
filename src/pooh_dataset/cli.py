@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from .calibration import MissingCalibrationError
-from .hub import DEFAULT_REPO_ID, default_root
+from .hub import DEFAULT_REPO_ID, DOMAINS, SIM_MODALITIES, default_root
 
 
 def _dataset(args):
@@ -21,26 +21,36 @@ def _dataset(args):
 def cmd_download(args) -> None:
     from .hub import download
 
-    root = download(args.repo, args.root, args.trajectory, args.modality, args.revision)
+    root = download(args.repo, args.root, args.trajectory, args.modality, args.revision, domain=args.domain)
     print(f"dataset at {root}")
 
 
 def cmd_info(args) -> None:
     ds = _dataset(args)
     print(f"{ds.repo_id} @ {ds.root}")
-    print("splits: " + ", ".join(f"{k}={v}" for k, v in ds.splits.items()))
-    for t in ds.trajectory_names:
+    print("splits: " + ", ".join(f"{k}={len(v)}" for k, v in ds.splits.items()))
+    names = ds.split("all", args.domain)
+    local_only = args.domain is None and not args.all
+    if local_only:  # the simulated trajectories are many: list the downloaded ones
+        names = [t for t in names if not ds[t].simulated or ds[t].modalities]
+    for t in names:
         info = ds.trajectory_info(t)
         local = ds[t].modalities
         counts = info["counts"]
         mods = ", ".join(f"{m}{'' if m in local else ' (remote)'}={n:,}" for m, n in counts.items())
-        print(f"  {t} [{info['domain']}] {mods or 'local: ' + ', '.join(local)}")
+        where = f"{info['group']}: {info['scenario']}" if info.get("scenario") else info["domain"]
+        print(f"  {t} [{where}] {mods or 'local: ' + ', '.join(local)}")
+    sim = ds.scenarios("synthetic")
+    if sim:
+        n = sum(len(v) for v in sim.values())
+        print(f"simulated: {n} trajectories in {len(sim)} scenarios"
+              + (" (use --all or --domain synthetic to list them)" if local_only else ""))
     print(f"objects: {sorted(ds.objects) or 'none'}")
 
 
 def cmd_check(args) -> None:
     """Report which calibration / model inputs are present (see DATA_REQUIREMENTS.md)."""
-    from .trajectory import CAMERAS
+    from .trajectory import CAMERAS, IMAGE_MODALITIES, SIM_IMAGE_MODALITIES
 
     ds = _dataset(args)
     ok = lambda b: "ok " if b else "-- "  # noqa: E731
@@ -53,7 +63,9 @@ def cmd_check(args) -> None:
               f"mocap_body={obj.mocap_body} verts={len(obj.vertices)} "
               f"T_body_model={'IDENTITY (placeholder?)' if ident else 'set'} "
               f"trajectories={obj.trajectories or 'all'}")
-    for t in ds.trajectory_names:
+    names = ds.split("all", args.domain) if args.domain else \
+        [t for t in ds.trajectory_names if not ds[t].simulated or ds[t].modalities]
+    for t in names:
         traj = ds[t]
         cal = traj.calibration
         print(f"{t}  (local modalities: {', '.join(traj.modalities) or 'none'})")
@@ -61,7 +73,8 @@ def cmd_check(args) -> None:
         if body_ok and traj.has("mocap"):
             body_ok = cal.reference_body in traj.mocap_bodies
         print(f"  reference_body     {ok(body_ok)} {cal.reference_body}")
-        for cam in CAMERAS:
+        own = SIM_IMAGE_MODALITIES if traj.simulated else IMAGE_MODALITIES
+        for cam in [c for c in CAMERAS if c in own or c == "events"]:
             intr = cal.cameras.get(cam)
             src = "" if intr is None else f" source={intr.source}"
             print(f"  {cam:17s}  intrinsics {ok(intr is not None)} extrinsics "
@@ -103,7 +116,8 @@ def cmd_quality(args) -> None:
     from .quality import dataset_report, format_reports
 
     ds = _dataset(args)
-    reports = dataset_report(ds, args.trajectory, robot_body=args.body,
+    names = args.trajectory or [t for t in ds.local_trajectory_names if ds.in_domain(t, args.domain)]
+    reports = dataset_report(ds, names, robot_body=args.body,
                              goal_tolerance_m=args.goal_tol_cm / 100)
     print(format_reports(reports))
     if args.json:
@@ -115,7 +129,7 @@ def cmd_viz(args) -> None:
     if args.download:  # before opening the dataset: the local folder may not exist yet
         from .hub import download
 
-        mods = args.modality or [m for m in VIZ_MODALITIES if m != "firefly"]
+        mods = args.modality or [m for m in VIZ_MODALITIES if m not in ("firefly", "steps", "joint_states")]
         args.root = download(args.repo, args.root, args.trajectory, mods, args.revision)
     ds = _dataset(args)
     names = args.trajectory or ds.local_trajectory_names
@@ -319,7 +333,7 @@ def cmd_align_markers(args) -> None:
 
 
 VIZ_MODALITIES = ["mocap", "robot_messages", "imu", "lidar", "realsense_color", "realsense_depth",
-                  "events", "firefly"]
+                  "events", "firefly"] + [m for m in SIM_MODALITIES if m not in ("events", "lidar", "mocap", "imu")]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -331,12 +345,21 @@ def main(argv: list[str] | None = None) -> int:
 
     d = sub.add_parser("download", help="download (part of) the dataset; resumes / updates")
     d.add_argument("-t", "--trajectory", action="append", help="repeatable; default all")
-    d.add_argument("-m", "--modality", action="append", help="repeatable; default all")
+    d.add_argument("-m", "--modality", action="append",
+                   help="repeatable; default all. Real: events, firefly, realsense_color, realsense_depth, "
+                        "lidar, imu, mocap, robot_messages; simulated: " + ", ".join(SIM_MODALITIES))
+    d.add_argument("--domain", choices=DOMAINS, default="real",
+                   help="without -t: real (default), synthetic (all simulated), sim_3d, sim_zerog or all")
     d.add_argument("--revision", help="commit sha / tag to pin")
     d.set_defaults(fn=cmd_download)
 
-    sub.add_parser("info", help="list trajectories, modalities, splits").set_defaults(fn=cmd_info)
-    sub.add_parser("check", help="which calibration / CAD inputs are missing").set_defaults(fn=cmd_check)
+    i = sub.add_parser("info", help="list trajectories, modalities, splits")
+    i.add_argument("--domain", choices=DOMAINS, help="only this domain (lists every trajectory of it)")
+    i.add_argument("--all", action="store_true", help="also list simulated trajectories not downloaded")
+    i.set_defaults(fn=cmd_info)
+    k = sub.add_parser("check", help="which calibration / CAD inputs are missing")
+    k.add_argument("--domain", choices=DOMAINS, help="check every trajectory of a domain (default: downloaded ones)")
+    k.set_defaults(fn=cmd_check)
 
     e = sub.add_parser("export", help="export detection / segmentation / pose labels")
     e.add_argument("format", choices=["bop", "coco", "yolo"])
@@ -358,8 +381,10 @@ def main(argv: list[str] | None = None) -> int:
 
     q = sub.add_parser("quality", help="per-trajectory health report (good / bad trajectories)")
     q.add_argument("-t", "--trajectory", action="append", help="repeatable; default all local")
-    q.add_argument("--body", default="floatingplatform", help="mocap body of the robot")
+    q.add_argument("--body", default=None,
+                   help="mocap body of the robot (default: floatingplatform, robot in simulation)")
     q.add_argument("--goal-tol-cm", type=float, default=10.0)
+    q.add_argument("--domain", choices=DOMAINS, help="only local trajectories of this domain")
     q.add_argument("--json", type=Path, help="also write the full report as JSON")
     q.set_defaults(fn=cmd_quality)
 

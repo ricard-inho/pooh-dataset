@@ -21,7 +21,9 @@ def write_image(path: Path, image: np.ndarray, raw_bytes: bytes | None = None, q
 
 
 def image_ext(camera: str) -> str:
-    return ".png" if camera == "realsense_depth" else ".jpg"
+    """Extension of a camera's encoded frames: 16-bit PNG depth, PNG simulated RGB and labels,
+    JPEG real RGB."""
+    return ".jpg" if camera in ("firefly", "realsense_color") else ".png"
 
 
 def raw_if_unchanged(task, ref) -> bytes | None:

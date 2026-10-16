@@ -3,6 +3,11 @@
 Calibration is read from ``calibration/rig.yaml`` (shared defaults, optional) merged with
 ``calibration/<trajectory>.yaml`` (per-trajectory override). See ``DATA_REQUIREMENTS.md``
 for the full schema.
+
+Simulated trajectories have their own format (no rig.yaml): each sensor has
+``T_base_sensor`` (sensor frame x forward, y left, z up, in the robot base frame). It is read
+as extrinsics on the ``robot`` mocap body, with cameras turned into their optical frame
+(z forward, x right, y down), and depth ``scale_m`` as ``depth_scale``.
 """
 
 from __future__ import annotations
@@ -24,6 +29,11 @@ REQUIREMENTS_HINT = (
     "files the dataset needs to provide, and run `pooh check` to see what is missing."
 )
 RESERVED_KEYS = {"extrinsics", "time_offsets_ns"}
+#: mocap body the simulated sensors are mounted on
+SIM_REFERENCE_BODY = "robot"
+#: optical frame (z forward, x right, y down) in a sensor frame (x forward, y left, z up)
+T_SENSOR_OPTICAL = np.array([[0.0, 0.0, 1.0, 0.0], [-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0],
+                             [0.0, 0.0, 0.0, 1.0]])
 
 
 class MissingCalibrationError(RuntimeError):
@@ -36,9 +46,10 @@ class MissingCalibrationError(RuntimeError):
 
 def parse_transform(value: Any) -> np.ndarray:
     """Parse a 4x4 transform given as 16 row-major numbers, a nested 4x4 list, or a mapping
-    ``{translation: [x, y, z], rotation_xyzw: [qx, qy, qz, qw]}``."""
+    ``{translation: [x, y, z], rotation_xyzw: [qx, qy, qz, qw]}`` (``translation_m`` also
+    accepted)."""
     if isinstance(value, dict):
-        t = value.get("translation", [0.0, 0.0, 0.0])
+        t = value.get("translation", value.get("translation_m", [0.0, 0.0, 0.0]))
         q = value.get("rotation_xyzw", value.get("quaternion_xyzw", [0.0, 0.0, 0.0, 1.0]))
         return make_pose(np.asarray(t, float), np.asarray(q, float))
     T = np.asarray(value, dtype=np.float64).reshape(4, 4)
@@ -74,7 +85,7 @@ class CameraIntrinsics:
             distortion_model=model,
             source=str(d.get("source", "unknown")),
             frame_id=d.get("frame_id"),
-            depth_scale=d.get("depth_scale"),
+            depth_scale=d.get("depth_scale", d.get("scale_m")),
         )
 
     @property
@@ -128,11 +139,13 @@ class Calibration:
     @classmethod
     def load(cls, calibration_dir: Path, trajectory: str) -> Calibration:
         calibration_dir = Path(calibration_dir)
+        own_path = calibration_dir / f"{trajectory}.yaml"
+        own = (yaml.safe_load(own_path.read_text()) or {}) if own_path.exists() else {}
         merged: dict[str, Any] = {}
-        for path in (calibration_dir / "rig.yaml", calibration_dir / f"{trajectory}.yaml"):
-            if path.exists():
-                data = yaml.safe_load(path.read_text()) or {}
-                _deep_merge(merged, data)
+        rig = calibration_dir / "rig.yaml"
+        if rig.exists() and not _is_sim(own):  # the real rig's defaults
+            _deep_merge(merged, yaml.safe_load(rig.read_text()) or {})
+        _deep_merge(merged, own)
         return cls.from_dict(trajectory, merged)
 
     @classmethod
@@ -147,6 +160,12 @@ class Calibration:
             name: parse_transform(v["T_body_cam"] if isinstance(v, dict) and "T_body_cam" in v else v)
             for name, v in (ext.get("cameras") or {}).items()
         }
+        if not ext and _is_sim(data):
+            ext = {"reference_body": SIM_REFERENCE_BODY}
+            for name, v in data.items():
+                if isinstance(v, dict) and "T_base_sensor" in v:
+                    T = parse_transform(v["T_base_sensor"])
+                    extrinsics[name] = T @ T_SENSOR_OPTICAL if name in cameras else T
         return cls(
             trajectory=trajectory,
             cameras=cameras,
@@ -178,6 +197,11 @@ class Calibration:
 
     def time_offset_ns(self, sensor: str) -> int:
         return self.time_offsets_ns.get(sensor, 0)
+
+
+def _is_sim(data: dict) -> bool:
+    """Calibration written by the simulation pipeline (sensor mounts as ``T_base_sensor``)."""
+    return any(isinstance(v, dict) and "T_base_sensor" in v for v in data.values())
 
 
 def _deep_merge(dst: dict, src: dict) -> dict:

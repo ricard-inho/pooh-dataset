@@ -26,9 +26,9 @@ def test_report_goal_and_flags(ds):
 
 def test_quality_cli_json(fake_root, tmp_path, capsys):
     out = tmp_path / "q.json"
-    assert main(["--root", str(fake_root), "quality", "--body", "SensorStack", "--json", str(out)]) == 0
+    assert main(["--root", str(fake_root), "quality", "--body", "SensorStack", "--domain", "real", "--json", str(out)]) == 0
     data = json.loads(out.read_text())
-    assert {d["trajectory"] for d in data} == {"trajectory_a", "trajectory_b"}
+    assert {d["trajectory"] for d in data} == {"trajectory_a"}  # trajectory_b is marked synthetic
 
 
 def test_viz_download_into_missing_root(tmp_path, monkeypatch, fake_root):
@@ -64,3 +64,13 @@ def test_viz_save(ds, tmp_path):
               progress=False, events_fps=10, objects=list(ds.objects.values()))
     rrd = tmp_path / "trajectory_a.rrd"
     assert rrd.exists() and rrd.stat().st_size > 10_000
+
+
+def test_viz_save_sim(ds, tmp_path):
+    pytest.importorskip("rerun")
+    from conftest import SIM_TRAJ
+
+    from pooh_dataset.viz import visualize
+
+    visualize([ds[SIM_TRAJ]], mode="save", save_dir=str(tmp_path), progress=False, events_fps=10)
+    assert (tmp_path / f"{SIM_TRAJ}.rrd").stat().st_size > 1_000

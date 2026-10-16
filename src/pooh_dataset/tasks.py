@@ -24,7 +24,7 @@ from .labels import (
     require_objects,
 )
 from .objects import ObjectModel
-from .trajectory import Trajectory
+from .trajectory import DEPTH_MODALITIES, Trajectory
 
 __all__ = ["FrameRef", "PoseEstimation", "ObjectDetection", "Segmentation", "OpticalFlow"]
 
@@ -59,7 +59,8 @@ class _FrameTask:
         self.undistort = undistort
         self.image_size = image_size
         self.max_gap_ns = max_gap_ns
-        self.trajectories = [t for t in dataset.split(split, domain) if dataset[t].has(self._index_modality)]
+        self.trajectories = [t for t in dataset.split(split, domain)
+                             if dataset[t].has(self._index_modality(dataset[t]))]
         if self.needs_objects:
             self.objects: list[ObjectModel] = require_objects(dataset.objects, objects)
         else:
@@ -67,8 +68,8 @@ class _FrameTask:
         self._views: dict[str, CameraView] = {}
         self.refs = [r for t in self.trajectories for r in self._index_trajectory(dataset[t], require_visible)]
 
-    @property
-    def _index_modality(self) -> str:
+    def _index_modality(self, traj: Trajectory) -> str:
+        """The modality whose rows are the samples."""
         return self.camera
 
     def __len__(self) -> int:
@@ -89,7 +90,7 @@ class _FrameTask:
         return [o for o in self.objects if o.present_in(traj.name) and o.mocap_body in bodies]
 
     def _index_trajectory(self, traj: Trajectory, require_visible: bool) -> list[FrameRef]:
-        ts = traj.timestamps(self._index_modality)
+        ts = traj.timestamps(self._index_modality(traj))
         idx = np.arange(0, len(ts), self.stride)
         if require_visible and self.needs_objects and not self.objects_in(traj):
             return []  # none of the requested objects were in this recording
@@ -220,10 +221,11 @@ class Segmentation(ObjectDetection):
 
 
 class OpticalFlow(_FrameTask):
-    """Dense optical-flow GT from RealSense depth + mocap (static scene + tracked objects).
+    """Dense optical-flow GT from depth + mocap (static scene + tracked objects).
 
-    * Frame cameras (``firefly``, ``realsense_color``, ``realsense_depth``): pairs of frames
-      ``(i, i + frame_gap)``; item keys ``image0``, ``image1``, ``flow`` (H, W, 2), ``valid``.
+    * Frame cameras (``firefly``, ``realsense_color``, ``realsense_depth``; simulated ``rgb``,
+      ``depth``): pairs of frames ``(i, i + frame_gap)``; item keys ``image0``, ``image1``,
+      ``flow`` (H, W, 2), ``valid``.
     * ``camera="events"``: windows ``[t0, t0 + window_ns)`` starting at every depth frame;
       item keys ``events`` (voxel grid, ``event_bins`` x H x W), ``flow``, ``valid``,
       ``t0_ns``, ``t1_ns``.
@@ -242,9 +244,10 @@ class OpticalFlow(_FrameTask):
         kw.setdefault("require_visible", False)
         super().__init__(dataset, split, camera, objects, **kw)
 
-    @property
-    def _index_modality(self) -> str:
-        return "realsense_depth" if self.camera == "events" else self.camera
+    def _index_modality(self, traj: Trajectory) -> str:
+        if self.camera == "events":
+            return traj.depth_modality or DEPTH_MODALITIES[0]
+        return self.camera
 
     def _index_trajectory(self, traj: Trajectory, require_visible: bool) -> list[FrameRef]:
         refs = super()._index_trajectory(traj, require_visible)
@@ -267,12 +270,12 @@ class OpticalFlow(_FrameTask):
         else:
             j = ref.index + self.frame_gap
             t0, t1 = ref.t_ns, int(traj.timestamps(self.camera)[j])
-            nearest = self.camera == "realsense_depth"
+            nearest = self.camera in DEPTH_MODALITIES
             s = {
                 "image0": view(traj.frame(self.camera, ref.index), nearest),
                 "image1": view(traj.frame(self.camera, j), nearest),
             }
-            depth_index = ref.index if self.camera == "realsense_depth" else None
+            depth_index = ref.index if self.camera == traj.depth_modality else None
         flow, valid = optical_flow(traj, self.camera, t0, t1, self.objects_in(traj),
                                    depth_index=depth_index, intr=view.intrinsics)
         s.update(flow=flow, valid=valid, K=view.intrinsics.K.copy(), trajectory=ref.trajectory,

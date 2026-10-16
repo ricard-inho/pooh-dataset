@@ -6,9 +6,11 @@ Quick start::
     ds = PoohDataset.download(modalities=["mocap", "realsense_color"])
     traj = ds["trajectory_007"]
     frame = traj.frame("realsense_color", 0)
+
+    sim = PoohDataset.download(domain="sim_3d", modalities=["rgb", "mocap"])
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .calibration import Calibration, CameraIntrinsics, MissingCalibrationError
 from .dataset import PoohDataset

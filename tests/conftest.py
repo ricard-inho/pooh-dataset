@@ -2,6 +2,11 @@
 
 Rig ("SensorStack", camera frame == body frame) moves along +x at 1 m/s, looking down +z.
 A 0.2 m cube ("cubesat") sits still at (0, 0, 2). Depth is a constant 2 m wall.
+
+Plus one simulated trajectory (``sim_3d_<modality>/trajectory_sim_000001``, simulation
+calibration and metadata, ``sim_manifest.json``): the robot moves along +y at 1 m/s, its
+camera (sensor frame = robot base frame, x forward) looks down world +x at a static target at
+(5, 0, 0) in front of a 5 m wall.
 """
 
 from __future__ import annotations
@@ -40,7 +45,14 @@ def _png16(arr):
     return b.getvalue()
 
 
+SIM_TRAJ = "trajectory_sim_000001"
+SIM_W, SIM_H, SIM_F = 64, 48, 40.0
+SIM_TARGET_X = 5.0
+
+
 def _write(root, modality, traj, table, row_group_size=None, files=1):
+    # every table on the Hub carries the trajectory name
+    table = table.append_column("trajectory_id", pa.array([traj] * table.num_rows))
     d = root / modality / traj
     d.mkdir(parents=True, exist_ok=True)
     n = table.num_rows
@@ -111,7 +123,75 @@ def build(root, trajectories=("trajectory_a", "trajectory_b")):
         "trajectory_info": {"trajectory_b": {"domain": "synthetic"}}}))
     (root / "splits.json").write_text(json.dumps(
         {"version": 1, "train": ["trajectory_a"], "val": [], "test": ["trajectory_b"]}))
+    build_sim(root)
     return root
+
+
+def _png(arr):
+    b = io.BytesIO()
+    Image.fromarray(arr).save(b, format="PNG")
+    return b.getvalue()
+
+
+def build_sim(root, traj=SIM_TRAJ, group="sim_3d"):
+    """A simulated trajectory in the Hub layout (timestamps start at the reset: 0)."""
+    frame_ts = np.arange(N_FRAMES, dtype=np.int64) * FRAME_DT
+    rgb = [_png(np.full((SIM_H, SIM_W, 3), 80 + 10 * i, np.uint8)) for i in range(N_FRAMES)]
+    depth = [_png16(np.full((SIM_H, SIM_W), int(SIM_TARGET_X * 1000), np.uint16)) for _ in frame_ts]
+    sem = np.zeros((SIM_H, SIM_W), np.uint8)
+    sem[SIM_H // 2 - 4:SIM_H // 2 + 4, SIM_W // 2 - 4:SIM_W // 2 + 4] = 2
+    for mod, imgs in (("rgb", rgb), ("depth", depth), ("semantic", [_png(sem)] * N_FRAMES)):
+        _write(root, f"{group}_{mod}", traj, pa.table({
+            "image": [{"bytes": b, "path": None} for b in imgs], "timestamp_ns": frame_ts,
+            "frame_index": np.arange(N_FRAMES)}))
+    n_ev = 500
+    rng = np.random.default_rng(1)
+    _write(root, f"{group}_events", traj, pa.table({
+        "t": np.sort(rng.integers(0, 500_000_000, n_ev)).astype(np.int64),
+        "x": rng.integers(0, SIM_W, n_ev).astype(np.uint16),
+        "y": rng.integers(0, SIM_H, n_ev).astype(np.uint16),
+        "p": rng.integers(0, 2, n_ev).astype(np.uint8)}))
+    mt = np.arange(0, 700_000_000, 10_000_000, dtype=np.int64)
+    rows = []
+    for ti in mt:
+        rows.append(("robot", ti, 0.0, SPEED * ti / 1e9, 0.0))
+        rows.append(("target", ti, SIM_TARGET_X, 0.0, 0.0))
+    b, ts, x, y, z = map(list, zip(*rows))
+    n = len(rows)
+    zero = [0.0] * n
+    _write(root, f"{group}_mocap", traj, pa.table({
+        "timestamp_ns": ts, "body": b, "x": x, "y": y, "z": z, "qx": zero, "qy": zero, "qz": zero,
+        "qw": [1.0] * n, "vx": zero, "vy": [SPEED if bb == "robot" else 0.0 for bb in b], "vz": zero,
+        "wx": zero, "wy": zero, "wz": zero}))
+    _write(root, f"{group}_imu", traj, pa.table({
+        "timestamp_ns": mt, **{f"angular_velocity_{a}": np.zeros(len(mt)) for a in "xyz"},
+        **{f"linear_acceleration_{a}": np.zeros(len(mt)) for a in "xyz"}}))
+    _write(root, f"{group}_lidar", traj, pa.table({
+        "scan_index": [0], "timestamp_ns": [0], "x": [[SIM_TARGET_X]], "y": [[0.0]], "z": [[0.0]],
+        "distance": [[SIM_TARGET_X]], "channel": pa.array([[3]], pa.list_(pa.uint16()))}))
+    steps = np.arange(4)
+    _write(root, f"{group}_steps", traj, pa.table({
+        "timestamp_ns": steps * 100_000_000, "step": steps, "action": [[0.0, 1.0]] * 4,
+        "observation": [[1.0, 2.0, 3.0]] * 4, "reward": np.ones(4), "reward_terms": [[0.5, 0.5]] * 4,
+        "goal_position_error": [1.0, 0.5, 0.1, 0.02], "goal_orientation_error": [0.1, 0.05, 0.02, 0.01],
+        "task_state": ["{}"] * 4, "terminated": [False] * 4, "truncated": [False, False, False, True]}))
+
+    mount = {"parent": "robot base", "translation_m": [0.0, 0.0, 0.0], "rotation_xyzw": [0.0, 0.0, 0.0, 1.0]}
+    cam = {"source": "simulation", "width": SIM_W, "height": SIM_H, "distortion_model": "none",
+           "D": [0.0] * 5, "K": [SIM_F, 0, (SIM_W - 1) / 2, 0, SIM_F, (SIM_H - 1) / 2, 0, 0, 1],
+           "T_base_sensor": mount}
+    (root / "calibration").mkdir(exist_ok=True)
+    (root / "calibration" / f"{traj}.yaml").write_text(yaml.safe_dump({
+        "rgb": cam, "depth": {**cam, "unit": "mm", "scale_m": 0.001}, "semantic": cam,
+        "events": {**cam, "emulator": "v2e"}, "lidar": {"source": "simulation", "T_base_sensor": mount}}))
+    (root / "metadata").mkdir(exist_ok=True)
+    (root / "metadata" / f"{traj}.yaml").write_text(yaml.safe_dump({
+        "source": "simulation", "semantic_classes": {"BACKGROUND": 0, "UNLABELLED": 1, "target": 2}}))
+    counts = {"rgb": N_FRAMES, "depth": N_FRAMES, "semantic": N_FRAMES, "events": n_ev, "mocap": n,
+              "imu": len(mt), "lidar": 1, "steps": 4}
+    (root / "sim_manifest.json").write_text(json.dumps({"license": "cc-by-4.0", "groups": [group], "trajectories": {
+        traj: {"counts": counts, "group": group, "scenario": "orbital/cubesat/black", "duration_s": 0.7,
+               "goal_position_error_m": 0.02, "goal_orientation_error_deg": 0.6, "source_dir": "x"}}}))
 
 
 @pytest.fixture(scope="session")

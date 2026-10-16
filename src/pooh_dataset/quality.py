@@ -12,8 +12,9 @@ import numpy as np
 
 from .dataset import PoohDataset
 from .geometry import quat_to_rotmat
+from .hub import SIM_MODALITIES
 from .labels import nearest_indices
-from .trajectory import IMAGE_MODALITIES, Trajectory
+from .trajectory import IMAGE_MODALITIES, SIM_IMAGE_MODALITIES, Trajectory
 
 __all__ = ["StreamStats", "TrajectoryReport", "trajectory_report", "dataset_report", "yaw_from_quat"]
 
@@ -21,6 +22,8 @@ GOAL_TOPIC = "/observation_formater_input"
 ALL_MODALITIES = ["events", "firefly", "realsense_color", "realsense_depth", "lidar", "imu", "mocap",
                   "robot_messages"]
 ROBOT_BODY = "floatingplatform"
+SIM_ROBOT_BODY = "robot"
+CAMERA_STREAMS = IMAGE_MODALITIES + SIM_IMAGE_MODALITIES
 
 
 def yaw_from_quat(q_xyzw: np.ndarray) -> np.ndarray:
@@ -89,15 +92,19 @@ class TrajectoryReport:
 def trajectory_report(
     traj: Trajectory,
     expected_modalities: list[str] | None = None,
-    robot_body: str = ROBOT_BODY,
+    robot_body: str | None = None,
     max_gap_ns: int = 50_000_000,
     goal_tolerance_m: float = 0.10,
     goal_tolerance_deg: float = 10.0,
     min_camera_hz: dict[str, float] | None = None,
 ) -> TrajectoryReport:
-    rep = TrajectoryReport(traj.name, traj.info.get("domain", "real"), local_modalities=traj.modalities)
+    """Health report of one trajectory. ``robot_body`` defaults to ``floatingplatform`` for
+    real and ``robot`` for simulated trajectories."""
+    sim = traj.simulated
+    robot_body = robot_body or (SIM_ROBOT_BODY if sim else ROBOT_BODY)
+    rep = TrajectoryReport(traj.name, traj.domain, local_modalities=traj.modalities)
     counts = traj.info.get("counts", {})
-    expected = expected_modalities or ALL_MODALITIES
+    expected = expected_modalities or ([m for m in SIM_MODALITIES if m in counts] if sim else ALL_MODALITIES)
     recorded = [m for m in expected if counts.get(m, 0) > 0 or traj.has(m)]
     rep.missing_modalities = [m for m in expected if m not in recorded] if counts else []
     rep.not_downloaded = [m for m in recorded if not traj.has(m)]
@@ -105,7 +112,7 @@ def trajectory_report(
                      **(min_camera_hz or {})}
     spans = []
 
-    for m in IMAGE_MODALITIES + ("imu", "lidar"):
+    for m in CAMERA_STREAMS + ("imu", "lidar"):
         if traj.has(m):
             ts = traj.timestamps(m)
             rep.streams[m] = st = StreamStats.from_timestamps(m, ts)
@@ -135,7 +142,7 @@ def trajectory_report(
         if robot_body not in rep.mocap_bodies:
             rep.warnings.append(f"robot body {robot_body!r} not tracked by mocap")
         else:
-            _robot_metrics(traj, rep, robot_body, max_gap_ns, goal_tolerance_m, goal_tolerance_deg)
+            _robot_metrics(traj, rep, robot_body, max_gap_ns, goal_tolerance_m, goal_tolerance_deg, sim)
     if spans:
         rep.duration_s = (max(s[1] for s in spans) - min(s[0] for s in spans)) / 1e9
     if rep.missing_modalities:
@@ -147,15 +154,19 @@ def trajectory_report(
     return rep
 
 
-def _robot_metrics(traj, rep, body, max_gap_ns, tol_m, tol_deg):
+def _robot_metrics(traj, rep, body, max_gap_ns, tol_m, tol_deg, sim=False):
     m = traj.mocap(body)
     xy = np.stack([m["x"], m["y"]], -1)
     yaw = yaw_from_quat(np.stack([m["qx"], m["qy"], m["qz"], m["qw"]], -1))
-    rep.path_length_m = float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum())
-    for cam in IMAGE_MODALITIES:
+    path = np.stack([m["x"], m["y"], m["z"]], -1) if sim else xy  # orbital sim is 3D
+    rep.path_length_m = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
+    for cam in CAMERA_STREAMS:
         if traj.has(cam):
             _, ok = traj.body_pose(body, traj.timestamps(cam), max_gap_ns)
             rep.label_coverage[cam] = float(np.mean(ok))
+    if sim:
+        _sim_goal_metrics(traj, rep, tol_m, tol_deg)
+        return
     if traj.has("robot_messages") and GOAL_TOPIC in traj.topics:
         _, msgs = traj.messages(GOAL_TOPIC)
         for g in msgs:
@@ -175,6 +186,24 @@ def _robot_metrics(traj, rep, body, max_gap_ns, tol_m, tol_deg):
         rep.warnings.append(f"no goal message on {GOAL_TOPIC}")
 
 
+def _sim_goal_metrics(traj, rep, tol_m, tol_deg):
+    """Simulated runs: goal errors of the last policy step (``steps``), else the manifest's
+    (median over the second half of the run)."""
+    if traj.has("steps"):
+        st = traj.steps()
+        pos, ang = float(st["goal_position_error"][-1]), float(np.degrees(st["goal_orientation_error"][-1]))
+        rep.min_goal_dist_m = float(np.min(st["goal_position_error"]))
+    elif "goal_position_error_m" in traj.info:
+        pos, ang = float(traj.info["goal_position_error_m"]), float(traj.info.get("goal_orientation_error_deg", np.nan))
+    else:
+        return
+    rep.final_pos_error_m, rep.final_yaw_error_deg = pos, ang
+    if pos > tol_m:
+        rep.warnings.append(f"goal missed: final error {pos * 100:.1f} cm")
+    if ang > tol_deg:
+        rep.warnings.append(f"orientation missed: final error {ang:.1f} deg")
+
+
 def dataset_report(ds: PoohDataset, trajectories: list[str] | None = None, **kw) -> list[TrajectoryReport]:
     names = trajectories or ds.local_trajectory_names
     return [trajectory_report(ds[t], **kw) for t in names]
@@ -186,15 +215,15 @@ def format_reports(reports: list[TrajectoryReport]) -> str:
         width = int(fmt.split(".")[0] or 0)
         return "-".rjust(width) if x is None or np.isnan(x) else format(x, fmt)
 
-    head = f"{'trajectory':18s} {'dur s':>6s} {'final err cm':>12s} {'yaw err°':>8s} {'path m':>7s} " \
+    head = f"{'trajectory':24s} {'dur s':>6s} {'final err cm':>12s} {'yaw err°':>8s} {'path m':>7s} " \
            f"{'mocap drops':>11s} {'label cov':>9s}  status"
     lines = [head, "-" * len(head)]
     for r in reports:
         drops = sum(s.n_gaps for k, s in r.streams.items() if k.startswith("mocap/"))
-        covs = [r.label_coverage[c] for c in IMAGE_MODALITIES if c in r.label_coverage]
+        covs = [r.label_coverage[c] for c in CAMERA_STREAMS if c in r.label_coverage]
         cov = min(covs) * 100 if covs else float("nan")
         lines.append(
-            f"{r.trajectory:18s} {f(r.duration_s, '6.1f')} {f(r.final_pos_error_m * 100, '12.1f')} "
+            f"{r.trajectory:24s} {f(r.duration_s, '6.1f')} {f(r.final_pos_error_m * 100, '12.1f')} "
             f"{f(r.final_yaw_error_deg, '8.1f')} {f(r.path_length_m, '7.2f')} {drops:11d} "
             f"{f(cov, '8.0f') + '%' if covs else '        -'}  {'OK' if r.ok else 'CHECK'}"
         )
