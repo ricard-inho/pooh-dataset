@@ -266,6 +266,18 @@ target_mask = sem == traj.semantic_classes["target"]
 T_world_cam, ok = camera_pose(traj, "rgb", traj.timestamps("rgb")[0])
 ```
 
+**Target CAD.** Every simulated trajectory observes one target, and its CAD is on the Hub. The
+satellite mockup, ISS, Gateway and Venus Express come from SRB's assets; a `cubesat<seed>` is
+SimForge's procedural CubeSat, generated from the scenario seed. `pooh download` fetches the
+models of the trajectories it downloads (`models/sim/<model>/`: `model.obj` + `.mtl` + textures,
+and the simulator's `model.usdz`):
+
+```python
+traj.target                  # {"model": "cubesat1034538678", "kind": "cubesat", "scale": 2.48}
+mesh = traj.target_mesh()    # trimesh, metres, in the frame of the mocap body "target", scaled
+traj.target_model_path       # models/sim/<model>/model.obj (unscaled)
+```
+
 Calibration comes from the simulation (`calibration/<trajectory>.yaml`): intrinsics, and each
 sensor's mount on the robot base, read as extrinsics on the `robot` mocap body (cameras in
 their optical frame). So `pooh_dataset.labels.camera_pose`, `traj.body_pose("target", t)` and
@@ -310,7 +322,8 @@ ds.split("test", domain="sim_zerog", task="docking", benchmark="v1")
 ```
 
 `--benchmark` pins the download to the benchmark's revision, so later uploads and repairs never
-change its data. Its simulated trajectories keep their split in the growing `splits.json` too.
+change its data. The target CAD was uploaded after the freeze, so it comes from the benchmark's
+`models_revision` (`22a8431`). Its simulated trajectories keep their split in the growing `splits.json` too.
 Cite the benchmark name and revision in the paper. `ds.hub_splits` gives the splits shown by the Hub viewer (simulation scenarios and
 groups of real trajectories); they organise the data and are not train / test splits.
 

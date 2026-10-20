@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 from collections import OrderedDict
@@ -310,6 +311,33 @@ class Trajectory:
         return yaml.safe_load(path.read_text()) or {}
 
     @property
+    def target(self) -> dict | None:
+        """The simulated target's CAD (``models/sim/targets.json``): ``model``, ``kind``
+        (satellite_mockup, cubesat, iss, gateway, venus_express) and ``scale``; None for real
+        data or when the models are not downloaded."""
+        return _sim_targets(self.root / "models" / "sim" / "targets.json").get(self.name)
+
+    @property
+    def target_model_path(self) -> Path | None:
+        """``models/sim/<model>/model.obj``: metres, in the frame of the mocap body ``target``,
+        **unscaled** (multiply by ``target["scale"]``). The simulator's USD is next to it."""
+        t = self.target
+        return None if t is None else self.root / "models" / "sim" / t["model"] / "model.obj"
+
+    def target_mesh(self, scaled: bool = True):
+        """The target's CAD as a ``trimesh.Trimesh`` (needs ``pooh-dataset[mesh]``), in the
+        ``target`` body frame, scaled to this trajectory unless ``scaled=False``."""
+        import trimesh
+
+        path = self.target_model_path
+        if path is None or not path.exists():
+            raise FileNotFoundError(f"{self.name}: no target CAD; download it with pooh download (sim data)")
+        mesh = trimesh.load(path, force="mesh", process=False)
+        if scaled:
+            mesh.apply_scale(float(self.target["scale"]))
+        return mesh
+
+    @property
     def semantic_classes(self) -> dict[str, int]:
         """Class name -> id of the simulated ``semantic`` images (e.g. ``target``: 2)."""
         return dict(self.metadata.get("semantic_classes", {}))
@@ -333,3 +361,13 @@ class Trajectory:
         """For array topics (Float64MultiArray, ...): (timestamp_ns, (N, D) array of ``field``)."""
         ts, msgs = self.messages(topic)
         return ts, np.asarray([m[field] for m in msgs], dtype=np.float64)
+
+
+@functools.lru_cache(maxsize=4)
+def _sim_targets_cached(path: str, mtime: float) -> dict:
+    return json.loads(Path(path).read_text())
+
+
+def _sim_targets(path: Path) -> dict:
+    """``models/sim/targets.json`` (cached per file version), {} without it."""
+    return _sim_targets_cached(str(path), path.stat().st_mtime) if path.exists() else {}

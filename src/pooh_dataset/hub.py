@@ -7,13 +7,15 @@ Hub layout (one repo for the real and the simulated recordings)::
     manifest.json, sim_manifest.json                trajectories of each domain
     calibration/<trajectory>.yaml, calibration/rig.yaml
     metadata/<trajectory>.yaml                      simulated only (scenario, rates, ...)
-    models/                                         object models
+    models/                                         object models (real)
+    models/sim/targets.json, models/sim/<model>/    simulated targets: trajectory -> CAD + scale
 """
 
 from __future__ import annotations
 
 import json
 import os
+import warnings
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -44,6 +46,9 @@ MANIFEST = "manifest.json"
 SIM_MANIFEST = "sim_manifest.json"
 #: small files always fetched: manifests, dataset card, splits, object models
 META_PATTERNS = ["README.md", MANIFEST, SIM_MANIFEST, "splits.json", "models/*"]
+#: the simulated targets' CAD is fetched per trajectory (download_sim_targets), not with the metadata
+META_IGNORE = ["models/sim/*"]
+SIM_TARGETS = "models/sim/targets.json"
 
 
 def default_root(repo_id: str = DEFAULT_REPO_ID) -> Path:
@@ -139,7 +144,7 @@ def download(
         from .dataset import PoohDataset
 
         snapshot_download(repo_id, repo_type="dataset", revision=revision, local_dir=root,
-                          allow_patterns=META_PATTERNS, max_workers=max_workers)
+                          allow_patterns=META_PATTERNS, ignore_patterns=META_IGNORE, max_workers=max_workers)
         trajs = PoohDataset(root, repo_id).split(split or "all", domain, task=task, benchmark=benchmark)
         if not trajs:
             raise ValueError(f"no trajectory with domain={domain!r} split={split!r} task={task!r} "
@@ -175,6 +180,42 @@ def download(
         revision=revision,
         local_dir=root,
         allow_patterns=META_PATTERNS + side + data,
+        ignore_patterns=META_IGNORE,
         max_workers=max_workers,
     )
+    if sim:
+        if trajs is not None:
+            sim_names = trajs
+        else:
+            sim_trajs = json.loads((root / SIM_MANIFEST).read_text()).get("trajectories", {}) \
+                if (root / SIM_MANIFEST).exists() else {}
+            sim_names = [t for t, e in sim_trajs.items() if e.get("group") in groups]
+        models_revision = revision
+        if benchmark is not None:  # the benchmark's data revision predates the models
+            models_revision = b.get("models_revision", revision)
+        download_sim_targets(repo_id, root, sim_names, models_revision, max_workers)
     return root
+
+
+def download_sim_targets(repo_id: str, root: Path, trajectories: list[str], revision: str | None = None,
+                         max_workers: int = 8) -> list[str]:
+    """CAD of the simulated targets of ``trajectories`` (``models/sim/<model>/``) and
+    ``models/sim/targets.json``; returns the models fetched. Real trajectories are ignored."""
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    try:
+        from huggingface_hub.errors import EntryNotFoundError
+    except ImportError:  # huggingface_hub < 0.24
+        from huggingface_hub.utils import EntryNotFoundError
+    try:
+        path = hf_hub_download(repo_id, SIM_TARGETS, repo_type="dataset", revision=revision, local_dir=root)
+    except EntryNotFoundError:
+        warnings.warn(f"{repo_id}@{revision or 'main'} has no {SIM_TARGETS}: no target CAD", stacklevel=2)
+        return []
+    targets = json.loads(Path(path).read_text())
+    models = sorted({targets[t]["model"] for t in trajectories if t in targets})
+    if models:
+        snapshot_download(repo_id, repo_type="dataset", revision=revision, local_dir=root,
+                          allow_patterns=["models/sim/README.md"] + [f"models/sim/{m}/*" for m in models],
+                          max_workers=max_workers)
+    return models

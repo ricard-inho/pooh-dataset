@@ -2,8 +2,9 @@
  "name": "benchmark_v1",
  "repo_id": "r3m3c3/off_test",
  "revision": "8205a1129f1fbb64cf7a4d0fc342b0a9e5c90509",
+ "models_revision": "22a8431d9844e948ae1394bf22ed96ae71b834d4",
  "frozen": "2026-10-20",
- "description": "Frozen benchmark for the POOH-D paper: the trajectories and train / test split of Hub revision 8205a11 (2195 simulated + 3 real trajectories). Simulated: per recording run, ~20% of the runs of each scenario config in test. Real: trajectory_007, trajectory_008 train, trajectory_009 test. Never changes; later data goes into new benchmark versions.",
+ "description": "Frozen benchmark for the POOH-D paper: the trajectories and train / test split of Hub revision 8205a11 (2195 simulated + 3 real trajectories). Simulated: per recording run, ~20% of the runs of each scenario config in test. Real: trajectory_007, trajectory_008 train, trajectory_009 test. The simulated targets' CAD (models/sim/) was uploaded after the freeze, at models_revision. Never changes; later data goes into new benchmark versions.",
  "train": [
   "trajectory_007",
   "trajectory_008",

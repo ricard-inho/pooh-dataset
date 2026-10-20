@@ -89,7 +89,11 @@ def test_download_patterns(monkeypatch, tmp_path):
 
     def fake_file(repo_id, filename, **kw):
         p = tmp_path / filename
-        p.write_text('{"trajectories": {"trajectory_007": {}}}')
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if filename == hub.SIM_TARGETS:
+            p.write_text('{"trajectory_hera_000001": {"model": "cubesat7", "kind": "cubesat", "scale": 2.0}}')
+        else:
+            p.write_text('{"trajectories": {"trajectory_007": {}}}')
         return str(p)
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot)
@@ -106,6 +110,7 @@ def test_download_patterns(monkeypatch, tmp_path):
     assert not any(p.startswith(("sim_3d", "rgb/", "mocap/")) for p in pats)
 
     hub.download(root=tmp_path, trajectories=["trajectory_hera_000001"], modalities=["rgb"])
+    assert calls.pop() == ["models/sim/README.md", "models/sim/cubesat7/*"]  # only that trajectory's target
     pats = calls.pop()
     assert {"rgb/trajectory_hera_000001/*.parquet", "sim_*_rgb/trajectory_hera_000001/*.parquet",
             "calibration/trajectory_hera_000001.yaml", "metadata/trajectory_hera_000001.yaml"} <= set(pats)
@@ -113,3 +118,22 @@ def test_download_patterns(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="unknown domain"):
         hub.download(root=tmp_path, domain="sim")
+
+
+def test_target_cad(ds):
+    import json
+    import shutil
+
+    trimesh = pytest.importorskip("trimesh")
+    sim = ds.root / "models" / "sim"
+    try:
+        (sim / "box").mkdir(parents=True)
+        trimesh.creation.box(extents=(1.0, 2.0, 3.0)).export(sim / "box" / "model.obj")
+        (sim / "targets.json").write_text(json.dumps({SIM_TRAJ: {"model": "box", "kind": "usd", "scale": 2.0}}))
+        traj = ds[SIM_TRAJ]
+        assert traj.target == {"model": "box", "kind": "usd", "scale": 2.0}
+        assert np.allclose(np.ptp(traj.target_mesh().vertices, 0), [2, 4, 6])
+        assert np.allclose(np.ptp(traj.target_mesh(scaled=False).vertices, 0), [1, 2, 3])
+        assert ds["trajectory_a"].target is None and ds["trajectory_a"].target_model_path is None
+    finally:
+        shutil.rmtree(ds.root / "models" / "sim", ignore_errors=True)
