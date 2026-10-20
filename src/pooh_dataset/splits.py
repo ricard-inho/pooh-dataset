@@ -21,6 +21,12 @@ trained on. Runs are balanced per scenario config (``zerog_cubesat_arm_wall_dock
 runs: a new run goes to ``test`` when that keeps the config's share of test runs closest
 to ``eval_fraction``.
 
+Frozen benchmarks (``benchmarks/<version>.json`` in this package, e.g. ``benchmark_v1``) pin a
+Hub revision and its train / test trajectories for papers: :func:`load_benchmark`,
+``ds.split(..., benchmark="v1")``, ``download(benchmark="v1")``. They never change; the Hub's
+``splits.json`` carries a copy of each (``benchmark_v1``, ...), written by
+:func:`update_sim_splits`.
+
 This module only uses the standard library: the sim publisher loads it by path.
 """
 
@@ -33,12 +39,17 @@ import warnings
 from collections.abc import Iterable
 from pathlib import Path
 
-__all__ = ["EVAL_FRACTION", "SPLIT_NAMES", "hash_split", "load_splits", "sim_run", "update_sim_splits"]
+__all__ = ["BENCHMARKS", "EVAL_FRACTION", "SPLIT_NAMES", "hash_split", "load_benchmark", "load_splits", "sim_run",
+           "update_sim_splits"]
 
 SPLIT_NAMES = ("train", "val", "test")
 #: share of the recording runs of each simulated scenario config that go to ``test``
 EVAL_FRACTION = 0.2
 VERSION = 2
+
+BENCHMARK_DIR = Path(__file__).resolve().parent / "benchmarks"
+#: frozen benchmark versions shipped with the package
+BENCHMARKS = tuple(sorted(p.stem for p in BENCHMARK_DIR.glob("v*.json")))
 
 # <config>_<scenario index>_<launch time>_<process index>, e.g.
 # zerog_cubesat_arm_wall_docking_00012_20261017T101530_002
@@ -65,6 +76,16 @@ def sim_run(source_dir: str) -> dict:
     return {"run": run, "config": config, "task": config.rsplit("_", 1)[-1], "time": m["time"]}
 
 
+def load_benchmark(name: str) -> dict:
+    """Frozen benchmark ``name`` ("v1" or "benchmark_v1"): ``repo_id``, ``revision``, ``train`` /
+    ``val`` / ``test`` trajectory lists, ``summary``."""
+    version = name.removeprefix("benchmark_")
+    path = BENCHMARK_DIR / f"{version}.json"
+    if not path.exists():
+        raise ValueError(f"unknown benchmark {name!r}; have {list(BENCHMARKS)}")
+    return json.loads(path.read_text())
+
+
 def load_splits(root: Path, trajectories: list[str], unlisted: Iterable[str] = ()) -> dict[str, list[str]]:
     """Splits of ``trajectories`` from ``splits.json``; those of ``unlisted`` (the real
     trajectories) that it does not list, or all of them without the file, get
@@ -73,7 +94,7 @@ def load_splits(root: Path, trajectories: list[str], unlisted: Iterable[str] = (
     data = json.loads(path.read_text()) if path.exists() else {}
     known = set(trajectories)
     splits = {k: [t for t in data.get(k, []) if t in known] for k in SPLIT_NAMES}
-    splits.update({k: v for k, v in data.items() if k not in SPLIT_NAMES and k != "summary" and isinstance(v, list)})
+    splits.update({k: v for k, v in data.items() if k not in SPLIT_NAMES and isinstance(v, list)})
     listed = {t for v in splits.values() for t in v}
     hashed = sorted(t for t in unlisted if t in known and t not in listed)
     if hashed:
@@ -90,10 +111,17 @@ def load_splits(root: Path, trajectories: list[str], unlisted: Iterable[str] = (
 def update_sim_splits(splits: dict | None, sim_manifest: dict, eval_fraction: float = EVAL_FRACTION) -> dict:
     """``splits.json`` content with the simulated trajectories of ``sim_manifest`` that it
     does not list yet added (see the module docstring). Listed trajectories, real or
-    simulated, never move. Returns a new dict; ``splits`` may be None (no file yet)."""
+    simulated, never move, and neither do the simulated trajectories of the frozen benchmarks.
+    Returns a new dict; ``splits`` may be None (no file yet)."""
     old = dict(splits or {})
     assigned = {t: k for k in SPLIT_NAMES for t in old.get(k, [])}
     entries = sim_manifest.get("trajectories", {})
+    for version in BENCHMARKS:  # frozen benchmarks fix the split of their simulated trajectories
+        b = load_benchmark(version)
+        for k in SPLIT_NAMES:
+            for t in b[k]:
+                if t in entries:
+                    assigned.setdefault(t, k)
     runs: dict[str, dict] = {}
     for t, e in entries.items():
         r = sim_run(e.get("source_dir", t))
@@ -127,7 +155,9 @@ def update_sim_splits(splits: dict | None, sim_manifest: dict, eval_fraction: fl
     lists = {k: set(old.get(k, [])) for k in SPLIT_NAMES}
     for name, run in runs.items():
         for t in run["trajectories"]:
-            if t not in assigned:
+            if t in assigned:
+                lists[assigned[t]].add(t)  # listed, or fixed by a benchmark
+            else:
                 lists[run_split[name]].add(t)
     summary: dict[str, dict[str, int]] = {}
     for k in SPLIT_NAMES:
@@ -144,4 +174,7 @@ def update_sim_splits(splits: dict | None, sim_manifest: dict, eval_fraction: fl
         **{k: sorted(lists[k]) for k in SPLIT_NAMES},
         "summary": dict(sorted(summary.items())),
     })
+    for version in BENCHMARKS:  # frozen copies, never edited here
+        b = load_benchmark(version)
+        out[b["name"]] = b
     return out

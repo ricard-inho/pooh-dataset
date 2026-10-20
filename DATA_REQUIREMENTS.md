@@ -215,6 +215,11 @@ trajectories not listed keep the hash fallback. The `splits` key of `manifest.js
 simulation scenarios are the *Hub viewer's* splits: they group the data for browsing and are
 exposed as `ds.hub_splits`, not used for training.
 
+Frozen benchmarks for papers (`benchmark_v1`: Hub revision `8205a11`, 2195 sim + 3 real
+trajectories, train 1762 / test 436) ship with the package (`pooh_dataset/benchmarks/`). They
+are copied unchanged into `splits.json` and fix the split of their simulated trajectories. A
+new benchmark is a new file (`v2.json`), never an edit.
+
 ## 10. Trajectory metadata — `manifest.json`
 
 Add an optional `trajectory_info` block next to the existing `trajectories` counts:

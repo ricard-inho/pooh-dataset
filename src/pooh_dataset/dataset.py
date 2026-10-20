@@ -17,7 +17,7 @@ from .hub import (
     download,
 )
 from .objects import ObjectModel, load_object_models
-from .splits import load_splits, sim_run
+from .splits import load_benchmark, load_splits, sim_run
 from .trajectory import Trajectory
 
 __all__ = ["PoohDataset"]
@@ -36,8 +36,14 @@ class PoohDataset:
     >>> sim.split("all", domain="synthetic")
     """
 
-    def __init__(self, root: str | Path | None = None, repo_id: str = DEFAULT_REPO_ID):
+    def __init__(self, root: str | Path | None = None, repo_id: str = DEFAULT_REPO_ID,
+                 benchmark: str | None = None):
+        """``benchmark`` ("v1"): default for :meth:`split`, so all splits come from that frozen
+        benchmark (download its data with ``download(benchmark=...)``)."""
         self.repo_id = repo_id
+        if benchmark is not None:
+            load_benchmark(benchmark)  # fail early on an unknown name
+        self.benchmark = benchmark
         self.root = Path(root) if root is not None else default_root(repo_id)
         if not self.root.exists():
             raise FileNotFoundError(
@@ -56,12 +62,15 @@ class PoohDataset:
         domain: str = "real",
         split: str | None = None,
         task: str | None = None,
+        benchmark: str | None = None,
     ) -> PoohDataset:
-        root = download(repo_id, root, trajectories, modalities, revision, domain=domain, split=split, task=task)
-        return cls(root, repo_id)
+        root = download(repo_id, root, trajectories, modalities, revision, domain=domain, split=split, task=task,
+                        benchmark=benchmark)
+        return cls(root, repo_id, benchmark=benchmark)
 
     def __repr__(self) -> str:
-        return f"PoohDataset({str(self.root)!r}, trajectories={len(self.trajectory_names)})"
+        bench = f", benchmark={self.benchmark!r}" if self.benchmark else ""
+        return f"PoohDataset({str(self.root)!r}, trajectories={len(self.trajectory_names)}{bench})"
 
     @cached_property
     def manifest(self) -> dict:
@@ -156,12 +165,26 @@ class PoohDataset:
             return True
         return info.get("group") in groups  # one simulation group
 
-    def split(self, name: str | Iterable[str], domain: str | None = None, task: str | None = None) -> list[str]:
+    def split(self, name: str | Iterable[str], domain: str | None = None, task: str | None = None,
+              benchmark: str | None = None) -> list[str]:
         """Trajectory names of a split ("train", "val", "test", "all" or an explicit list),
         optionally restricted to a domain ("real", "synthetic", "sim_3d", "sim_zerog") and a
-        simulated task ("approach", "orbit", "docking", "inspection")."""
+        simulated task ("approach", "orbit", "docking", "inspection").
+
+        ``benchmark`` ("v1") takes the split from that frozen benchmark instead of
+        ``splits.json`` (download its data with ``download(benchmark=...)``: it pins the Hub
+        revision); "all" is then every trajectory of the benchmark. It defaults to the dataset's
+        ``benchmark``."""
+        benchmark = benchmark if benchmark is not None else self.benchmark
         if isinstance(name, str):
-            names = self.trajectory_names if name == "all" else self.splits.get(name)
+            if benchmark is not None:
+                b = load_benchmark(benchmark)
+                names = [t for k in ("train", "val", "test") for t in b[k]] if name == "all" else b.get(name)
+                if names is None:
+                    raise KeyError(f"unknown split {name!r} in {b['name']}")
+                names = sorted(t for t in names if t in self._entries) if self._entries else sorted(names)
+            else:
+                names = self.trajectory_names if name == "all" else self.splits.get(name)
             if names is None:
                 raise KeyError(f"unknown split {name!r}; have {sorted(self.splits)}")
         else:

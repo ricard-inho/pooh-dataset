@@ -47,6 +47,7 @@ pooh download -m mocap -m realsense_color -m realsense_depth
 pooh download -t trajectory_007 -m events
 pooh download --domain sim_3d -m rgb -m mocap  # simulated: synthetic, sim_3d, sim_zerog; all = both
 pooh download --domain sim_zerog --task docking --split test   # one simulated task, eval runs only
+pooh download --benchmark v1 --domain sim_zerog --task docking --split test  # same, frozen paper benchmark
 pooh download --revision <commit-sha>          # pin a dataset version for a paper
 pooh info                                      # what is local / remote, splits
 pooh splits                                    # train / val / test counts per domain and task
@@ -286,7 +287,31 @@ one recording run (same scenario, same seed) are in the same split, and about 20
 of each scenario config (target, background or arm, task) are in `test`, so every task has
 eval runs from every day of recording. Real trajectories are not in the file yet: they keep
 the hash-based split (`trajectory_007`, `trajectory_008` train, `trajectory_009` test). Pin
-`--revision` to cite one version of the file. `ds.hub_splits` gives the splits shown by the Hub viewer (simulation scenarios and
+`--revision` to cite one version of the file.
+
+### Benchmarks (for papers)
+
+The split above grows every day. Paper numbers use a **frozen benchmark** instead: the data of
+one Hub revision with a fixed train / test split. It ships with the package
+(`pooh_dataset/benchmarks/v1.json`), and the Hub's `splits.json` carries a copy.
+
+| benchmark | Hub revision | trajectories | train / test |
+|---|---|---|---|
+| `v1` (`benchmark_v1`, frozen 2026-10-20) | `8205a11` | 2195 sim + 3 real | sim_3d/approach 378 / 93, sim_3d/orbit 800 / 201, sim_zerog/docking 300 / 72, sim_zerog/inspection 282 / 69, real 2 / 1 |
+
+```bash
+pooh download --benchmark v1 --domain sim_zerog --task docking --split test -m rgb -m depth -m mocap
+pooh splits --benchmark v1
+```
+
+```python
+ds = PoohDataset.download(benchmark="v1", domain="sim_3d", split="train", modalities=["rgb", "mocap"])
+ds.split("test", domain="sim_zerog", task="docking", benchmark="v1")
+```
+
+`--benchmark` pins the download to the benchmark's revision, so later uploads and repairs never
+change its data. Its simulated trajectories keep their split in the growing `splits.json` too.
+Cite the benchmark name and revision in the paper. `ds.hub_splits` gives the splits shown by the Hub viewer (simulation scenarios and
 groups of real trajectories); they organise the data and are not train / test splits.
 
 ## Export to standard formats

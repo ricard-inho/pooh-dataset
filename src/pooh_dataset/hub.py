@@ -101,6 +101,7 @@ def download(
     domain: str = "real",
     split: str | None = None,
     task: str | None = None,
+    benchmark: str | None = None,
 ) -> Path:
     """Download (or resume / update) part of the dataset and return the local root.
 
@@ -113,7 +114,9 @@ def download(
 
     ``split`` ("train", "val", "test", from ``splits.json``) and ``task`` ("approach",
     "orbit", "docking", "inspection") narrow the trajectories of ``domain`` further, e.g.
-    ``download(domain="sim_zerog", task="docking", split="test")``.
+    ``download(domain="sim_zerog", task="docking", split="test")``. ``benchmark`` ("v1") takes
+    the split from that frozen benchmark and downloads at its Hub revision (``revision`` must
+    then be None or the same).
 
     Already-downloaded files are skipped, so calling this again after new trajectories were
     added only fetches the new ones. Pin ``revision`` (a commit sha or tag) for reproducible
@@ -124,15 +127,23 @@ def download(
     root = Path(root) if root is not None else default_root(repo_id)
     trajs, mods = _as_list(trajectories), _as_list(modalities)
     real, groups = domain_parts(domain)
-    if trajs is None and (split is not None or task is not None):
+    if benchmark is not None:
+        from .splits import load_benchmark
+
+        b = load_benchmark(benchmark)
+        if revision not in (None, b["revision"]):
+            raise ValueError(f"{b['name']} is pinned to revision {b['revision']}, not {revision}")
+        revision = b["revision"]
+    if trajs is None and (split is not None or task is not None or benchmark is not None):
         # Pick the trajectories from the manifests and splits.json, then fetch them by name.
         from .dataset import PoohDataset
 
         snapshot_download(repo_id, repo_type="dataset", revision=revision, local_dir=root,
                           allow_patterns=META_PATTERNS, max_workers=max_workers)
-        trajs = PoohDataset(root, repo_id).split(split or "all", domain, task=task)
+        trajs = PoohDataset(root, repo_id).split(split or "all", domain, task=task, benchmark=benchmark)
         if not trajs:
-            raise ValueError(f"no trajectory with domain={domain!r} split={split!r} task={task!r}")
+            raise ValueError(f"no trajectory with domain={domain!r} split={split!r} task={task!r} "
+                             f"benchmark={benchmark!r}")
 
     if trajs is not None:
         # Trajectory names are unique across domains: match both layouts.

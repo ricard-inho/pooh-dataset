@@ -10,7 +10,7 @@ import numpy as np
 
 from .calibration import MissingCalibrationError
 from .hub import DEFAULT_REPO_ID, DOMAINS, SIM_MODALITIES, default_root
-from .splits import EVAL_FRACTION
+from .splits import BENCHMARKS, EVAL_FRACTION
 
 
 def _dataset(args):
@@ -23,7 +23,7 @@ def cmd_download(args) -> None:
     from .hub import download
 
     root = download(args.repo, args.root, args.trajectory, args.modality, args.revision, domain=args.domain,
-                    split=args.split, task=args.task)
+                    split=args.split, task=args.task, benchmark=args.benchmark)
     print(f"dataset at {root}")
 
 
@@ -67,9 +67,14 @@ def cmd_splits(args) -> None:
         return
 
     ds = _dataset(args)
+    if args.benchmark:
+        from .splits import load_benchmark
+
+        b = load_benchmark(args.benchmark)
+        print(f"{b['name']}: {b['repo_id']}@{b['revision'][:7]}, frozen {b['frozen']}")
     rows: dict[str, dict[str, int]] = {}
     for split in ("train", "val", "test"):
-        for t in ds.split(split):
+        for t in ds.split(split, benchmark=args.benchmark):
             info = ds.trajectory_info(t)
             cell = f"{info.get('group') or info['domain']}/{info['task']}" if info.get("task") else \
                 (info.get("group") or info["domain"])
@@ -406,11 +411,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="without -t: real (default), synthetic (all simulated), sim_3d, sim_zerog or all")
     d.add_argument("--split", choices=["train", "val", "test"], help="only the trajectories of this split")
     d.add_argument("--task", help="only this simulated task: approach, orbit (sim_3d), docking, inspection (sim_zerog)")
+    d.add_argument("--benchmark", choices=BENCHMARKS,
+                   help="frozen benchmark (e.g. v1): its split and Hub revision")
     d.add_argument("--revision", help="commit sha / tag to pin")
     d.set_defaults(fn=cmd_download)
 
     s = sub.add_parser("splits", help="train / test split per domain and task; `update` assigns new sim runs")
     s.add_argument("action", nargs="?", choices=["show", "update"], default="show")
+    s.add_argument("--benchmark", choices=BENCHMARKS, help="show: the frozen benchmark's split")
     s.add_argument("--push", action="store_true", help="update: upload the new splits.json to the Hub")
     s.add_argument("--eval-fraction", type=float, default=EVAL_FRACTION, help="update: share of runs per scenario in test")
     s.set_defaults(fn=cmd_splits)
