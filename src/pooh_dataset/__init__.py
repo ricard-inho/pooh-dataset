@@ -10,7 +10,7 @@ Quick start::
     sim = PoohDataset.download(domain="sim_3d", modalities=["rgb", "mocap"])
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .calibration import Calibration, CameraIntrinsics, MissingCalibrationError
 from .dataset import PoohDataset

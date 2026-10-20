@@ -17,7 +17,7 @@ from .hub import (
     download,
 )
 from .objects import ObjectModel, load_object_models
-from .splits import load_splits
+from .splits import load_splits, sim_run
 from .trajectory import Trajectory
 
 __all__ = ["PoohDataset"]
@@ -54,8 +54,10 @@ class PoohDataset:
         modalities: str | Iterable[str] | None = None,
         revision: str | None = None,
         domain: str = "real",
+        split: str | None = None,
+        task: str | None = None,
     ) -> PoohDataset:
-        root = download(repo_id, root, trajectories, modalities, revision, domain=domain)
+        root = download(repo_id, root, trajectories, modalities, revision, domain=domain, split=split, task=task)
         return cls(root, repo_id)
 
     def __repr__(self) -> str:
@@ -111,8 +113,9 @@ class PoohDataset:
     def trajectory_info(self, name: str) -> dict:
         """Free-form metadata: ``domain`` (real / synthetic), ``counts`` per modality,
         ``hub_split`` (the trajectory's split on the Hub viewer, if known); simulated
-        trajectories add ``group`` (sim_3d / sim_zerog), ``scenario``, ``duration_s`` and the
-        final goal errors."""
+        trajectories add ``group`` (sim_3d / sim_zerog), ``scenario``, ``task`` (approach /
+        orbit in sim_3d, docking / inspection in sim_zerog), ``run`` (the recording run: its
+        episodes share a split), ``duration_s`` and the final goal errors."""
         info = dict(self._entries.get(name, {}))
         if not info:
             info = {"domain": "synthetic", "group": _disk_group(self.root, name)} \
@@ -137,7 +140,9 @@ class PoohDataset:
 
     @cached_property
     def splits(self) -> dict[str, list[str]]:
-        return load_splits(self.root, self.trajectory_names)
+        """Split name -> trajectories, from ``splits.json`` (see :mod:`pooh_dataset.splits`)."""
+        real = [t for t in self.trajectory_names if self.trajectory_info(t)["domain"] == "real"]
+        return load_splits(self.root, self.trajectory_names, unlisted=real)
 
     def in_domain(self, name: str, domain: str | None) -> bool:
         """Whether trajectory ``name`` belongs to ``domain`` (see :data:`pooh_dataset.hub.DOMAINS`)."""
@@ -151,16 +156,27 @@ class PoohDataset:
             return True
         return info.get("group") in groups  # one simulation group
 
-    def split(self, name: str | Iterable[str], domain: str | None = None) -> list[str]:
+    def split(self, name: str | Iterable[str], domain: str | None = None, task: str | None = None) -> list[str]:
         """Trajectory names of a split ("train", "val", "test", "all" or an explicit list),
-        optionally restricted to a domain ("real", "synthetic", "sim_3d", "sim_zerog")."""
+        optionally restricted to a domain ("real", "synthetic", "sim_3d", "sim_zerog") and a
+        simulated task ("approach", "orbit", "docking", "inspection")."""
         if isinstance(name, str):
             names = self.trajectory_names if name == "all" else self.splits.get(name)
             if names is None:
                 raise KeyError(f"unknown split {name!r}; have {sorted(self.splits)}")
         else:
             names = list(name)
-        return [t for t in names if self.in_domain(t, domain)]
+        return [t for t in names if self.in_domain(t, domain)
+                and (task is None or self.trajectory_info(t).get("task") == task)]
+
+    def tasks(self, domain: str = "synthetic") -> dict[str, list[str]]:
+        """Task (``<group>/<task>``, e.g. ``sim_zerog/docking``) -> trajectories."""
+        out: dict[str, list[str]] = {}
+        for t in self.split("all", domain):
+            info = self.trajectory_info(t)
+            if info.get("task") is not None:
+                out.setdefault(f"{info.get('group') or info['domain']}/{info['task']}", []).append(t)
+        return out
 
     @cached_property
     def hub_splits(self) -> dict[str, list[str]]:
@@ -193,6 +209,10 @@ def _sim_info(entry: dict) -> dict:
     info = {k: v for k, v in entry.items() if k != "source_dir"}
     info["domain"] = "synthetic"
     info.setdefault("group", None)
+    if "source_dir" in entry:
+        run = sim_run(entry["source_dir"])
+        info.setdefault("task", run["task"])
+        info["run"] = run["run"]
     if "scenario" in entry:
         # Hub split: the scenario without the group (orbital/iss/earth -> iss_earth)
         info["hub_split"] = "_".join(entry["scenario"].split("/")[1:])

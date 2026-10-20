@@ -48,7 +48,7 @@ Conventions used everywhere:
 | 6 | Floating platform mesh + `T_body_model` (optional, for occlusion + a 2nd class) | `models/objects.yaml` | better masks | optional |
 | 7 | Per-sensor time offsets, if any sensor is not on the host clock | `calibration/rig.yaml` | exact sync | optional |
 | 8 | RealSense depth scale + which frame depth is aligned to | `calibration/<traj>.yaml` | flow | verify |
-| 9 | Official train / val / test split | `splits.json` | comparable results | missing |
+| 9 | Official train / val / test split | `splits.json` | comparable results | **simulated done** (written on every sim publish); real: hash fallback |
 | 10 | Per-trajectory metadata (real / synthetic, task type) | `manifest.json` | filtering | optional |
 
 ---
@@ -192,10 +192,11 @@ The offset is **added** to that sensor's timestamps everywhere in the package.
 
 ```json
 {
-  "version": 1,
-  "train": ["trajectory_007", "trajectory_008"],
+  "version": 2,
+  "train": ["trajectory_hera_000001", "..."],
   "val":   [],
-  "test":  ["trajectory_009"]
+  "test":  ["trajectory_hera_000007", "..."],
+  "summary": {"sim_3d/approach": {"train": 378, "val": 0, "test": 93}, "...": {}}
 }
 ```
 
@@ -205,8 +206,12 @@ hash of the trajectory name and prints a warning. Add new trajectories to the fi
 they are uploaded, and never move old ones between splits. Bump `version` whenever the
 file changes, so results can cite it.
 
-The file covers the simulated trajectories too (they are split by the same hash until they are
-listed). The `splits` key of `manifest.json` (the real converter's `--split`) and the
+The simulated trajectories are added by `pooh_dataset.splits.update_sim_splits`, which the sim
+publisher (`pooh_dataset_pipeline/sim/publish_hf.py`) runs on every upload; `pooh splits update
+--push` does the same by hand. It is append-only, keeps every listed trajectory (real ones
+too), puts all episodes of a recording run in one split and sends ~20% of the runs of each
+scenario config to `test`. Simulated trajectories not listed yet are in no split. Real
+trajectories not listed keep the hash fallback. The `splits` key of `manifest.json` (the real converter's `--split`) and the
 simulation scenarios are the *Hub viewer's* splits: they group the data for browsing and are
 exposed as `ds.hub_splits`, not used for training.
 

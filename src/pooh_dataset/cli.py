@@ -10,6 +10,7 @@ import numpy as np
 
 from .calibration import MissingCalibrationError
 from .hub import DEFAULT_REPO_ID, DOMAINS, SIM_MODALITIES, default_root
+from .splits import EVAL_FRACTION
 
 
 def _dataset(args):
@@ -21,8 +22,61 @@ def _dataset(args):
 def cmd_download(args) -> None:
     from .hub import download
 
-    root = download(args.repo, args.root, args.trajectory, args.modality, args.revision, domain=args.domain)
+    root = download(args.repo, args.root, args.trajectory, args.modality, args.revision, domain=args.domain,
+                    split=args.split, task=args.task)
     print(f"dataset at {root}")
+
+
+def cmd_splits(args) -> None:
+    """Show the train / test split per domain and task; ``update`` adds the new simulated
+    trajectories of the Hub's sim_manifest.json to the Hub's splits.json."""
+    import json
+
+    if args.action == "update":
+        from huggingface_hub import HfApi, hf_hub_download
+
+        from .hub import SIM_MANIFEST, remote_sim_manifest
+        from .splits import update_sim_splits
+
+        try:
+            from huggingface_hub.errors import EntryNotFoundError
+        except ImportError:  # huggingface_hub < 0.24
+            from huggingface_hub.utils import EntryNotFoundError
+        try:
+            current = json.loads(Path(hf_hub_download(args.repo, "splits.json", repo_type="dataset",
+                                                      force_download=True)).read_text())
+        except EntryNotFoundError:  # no splits.json on the Hub yet
+            current = None
+        manifest = remote_sim_manifest(args.repo)
+        new = update_sim_splits(current, manifest, args.eval_fraction)
+        before = {t for k in ("train", "val", "test") for t in (current or {}).get(k, [])}
+        added = sum(t not in before for k in ("train", "val", "test") for t in new[k])
+        root = args.root or default_root(args.repo)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "splits.json").write_text(json.dumps(new, indent=1) + "\n")
+        print(f"{added} new simulated trajectories assigned ({len(manifest.get('trajectories', {}))} in {SIM_MANIFEST})")
+        for cell, n in new["summary"].items():
+            print(f"  {cell:<22} train {n['train']:>6}  test {n['test']:>5}")
+        print(f"written {root / 'splits.json'}")
+        if args.push and added:
+            HfApi().upload_file(path_or_fileobj=root / "splits.json", path_in_repo="splits.json", repo_id=args.repo,
+                                repo_type="dataset", commit_message=f"splits.json: +{added} simulated trajectories")
+            print(f"pushed to {args.repo}")
+        elif args.push:
+            print("nothing new: not pushed")
+        return
+
+    ds = _dataset(args)
+    rows: dict[str, dict[str, int]] = {}
+    for split in ("train", "val", "test"):
+        for t in ds.split(split):
+            info = ds.trajectory_info(t)
+            cell = f"{info.get('group') or info['domain']}/{info['task']}" if info.get("task") else \
+                (info.get("group") or info["domain"])
+            rows.setdefault(cell, {"train": 0, "val": 0, "test": 0})[split] += 1
+    print(f"{'':<22} {'train':>6} {'val':>5} {'test':>5}")
+    for cell, n in sorted(rows.items()):
+        print(f"  {cell:<20} {n['train']:>6} {n['val']:>5} {n['test']:>5}")
 
 
 def cmd_info(args) -> None:
@@ -350,8 +404,16 @@ def main(argv: list[str] | None = None) -> int:
                         "lidar, imu, mocap, robot_messages; simulated: " + ", ".join(SIM_MODALITIES))
     d.add_argument("--domain", choices=DOMAINS, default="real",
                    help="without -t: real (default), synthetic (all simulated), sim_3d, sim_zerog or all")
+    d.add_argument("--split", choices=["train", "val", "test"], help="only the trajectories of this split")
+    d.add_argument("--task", help="only this simulated task: approach, orbit (sim_3d), docking, inspection (sim_zerog)")
     d.add_argument("--revision", help="commit sha / tag to pin")
     d.set_defaults(fn=cmd_download)
+
+    s = sub.add_parser("splits", help="train / test split per domain and task; `update` assigns new sim runs")
+    s.add_argument("action", nargs="?", choices=["show", "update"], default="show")
+    s.add_argument("--push", action="store_true", help="update: upload the new splits.json to the Hub")
+    s.add_argument("--eval-fraction", type=float, default=EVAL_FRACTION, help="update: share of runs per scenario in test")
+    s.set_defaults(fn=cmd_splits)
 
     i = sub.add_parser("info", help="list trajectories, modalities, splits")
     i.add_argument("--domain", choices=DOMAINS, help="only this domain (lists every trajectory of it)")

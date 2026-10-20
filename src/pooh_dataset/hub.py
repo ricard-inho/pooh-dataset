@@ -99,6 +99,8 @@ def download(
     revision: str | None = None,
     max_workers: int = 8,
     domain: str = "real",
+    split: str | None = None,
+    task: str | None = None,
 ) -> Path:
     """Download (or resume / update) part of the dataset and return the local root.
 
@@ -109,6 +111,10 @@ def download(
     of the domain: ``realsense_color``, ... for real data, ``rgb``, ``depth``, ``semantic``, ...
     for simulated data (see :data:`REAL_MODALITIES`, :data:`SIM_MODALITIES`).
 
+    ``split`` ("train", "val", "test", from ``splits.json``) and ``task`` ("approach",
+    "orbit", "docking", "inspection") narrow the trajectories of ``domain`` further, e.g.
+    ``download(domain="sim_zerog", task="docking", split="test")``.
+
     Already-downloaded files are skipped, so calling this again after new trajectories were
     added only fetches the new ones. Pin ``revision`` (a commit sha or tag) for reproducible
     experiments.
@@ -118,6 +124,15 @@ def download(
     root = Path(root) if root is not None else default_root(repo_id)
     trajs, mods = _as_list(trajectories), _as_list(modalities)
     real, groups = domain_parts(domain)
+    if trajs is None and (split is not None or task is not None):
+        # Pick the trajectories from the manifests and splits.json, then fetch them by name.
+        from .dataset import PoohDataset
+
+        snapshot_download(repo_id, repo_type="dataset", revision=revision, local_dir=root,
+                          allow_patterns=META_PATTERNS, max_workers=max_workers)
+        trajs = PoohDataset(root, repo_id).split(split or "all", domain, task=task)
+        if not trajs:
+            raise ValueError(f"no trajectory with domain={domain!r} split={split!r} task={task!r}")
 
     if trajs is not None:
         # Trajectory names are unique across domains: match both layouts.

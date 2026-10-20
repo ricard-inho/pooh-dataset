@@ -46,13 +46,15 @@ pooh download                                  # all real data
 pooh download -m mocap -m realsense_color -m realsense_depth
 pooh download -t trajectory_007 -m events
 pooh download --domain sim_3d -m rgb -m mocap  # simulated: synthetic, sim_3d, sim_zerog; all = both
+pooh download --domain sim_zerog --task docking --split test   # one simulated task, eval runs only
 pooh download --revision <commit-sha>          # pin a dataset version for a paper
 pooh info                                      # what is local / remote, splits
+pooh splits                                    # train / val / test counts per domain and task
 pooh check                                     # which calibration / CAD inputs exist
 ```
 
-Without `-t`, `--domain` picks what is downloaded (default `real`). With `-t`, the named
-trajectories are downloaded whatever their domain.
+Without `-t`, `--domain` picks what is downloaded (default `real`), and `--split` / `--task`
+narrow it down. With `-t`, the named trajectories are downloaded whatever their domain.
 
 The default location is `~/.cache/pooh_dataset/<repo>`. Override it with `--root` or
 `$POOH_DATA_DIR`, and point at another repo with `--repo` / `$POOH_REPO_ID`.
@@ -250,10 +252,13 @@ from pooh_dataset.labels import camera_pose
 
 ds = PoohDataset.download(domain="sim_3d", modalities=["rgb", "depth", "semantic", "mocap"])
 ds.scenarios()                         # {"orbital/iss/earth": [...], ...}
-ds.split("train", domain="sim_3d")     # train / val / test by trajectory, like the real data
+ds.split("train", domain="sim_3d")     # train / test by recording run (splits.json)
+ds.split("test", domain="sim_zerog", task="docking")
+ds.tasks()                             # {"sim_3d/approach": [...], "sim_3d/orbit": [...],
+                                       #  "sim_zerog/docking": [...], "sim_zerog/inspection": [...]}
 
 traj = ds[ds.scenarios()["orbital/iss/earth"][0]]
-traj.info                              # group, scenario, duration_s, goal errors, counts
+traj.info                              # group, scenario, task, run, duration_s, goal errors, counts
 traj.metadata                          # scenario parameters, rates, frames and units, term names
 rgb, sem = traj.frame("rgb", 0), traj.frame("semantic", 0)
 target_mask = sem == traj.semantic_classes["target"]
@@ -269,7 +274,19 @@ their optical frame). So `pooh_dataset.labels.camera_pose`, `traj.body_pose("tar
 masks and the `target` mocap body the pose.
 
 Domains in `ds.split(..., domain=...)`: `real`, `synthetic` (all simulated), `sim_3d`,
-`sim_zerog`. `ds.hub_splits` gives the splits shown by the Hub viewer (simulation scenarios and
+`sim_zerog`. Tasks in `ds.split(..., task=...)`: `approach` and `orbit` (sim_3d), `docking` and
+`inspection` (sim_zerog).
+
+### Splits
+
+`splits.json` on the Hub lists the train and test (eval) trajectories; there is no simulated
+`val`. It is updated by the sim publisher every time new runs are uploaded (or by hand with
+`pooh splits update --push`), append-only: a trajectory never changes split. All episodes of
+one recording run (same scenario, same seed) are in the same split, and about 20% of the runs
+of each scenario config (target, background or arm, task) are in `test`, so every task has
+eval runs from every day of recording. Real trajectories are not in the file yet: they keep
+the hash-based split (`trajectory_007`, `trajectory_008` train, `trajectory_009` test). Pin
+`--revision` to cite one version of the file. `ds.hub_splits` gives the splits shown by the Hub viewer (simulation scenarios and
 groups of real trajectories); they organise the data and are not train / test splits.
 
 ## Export to standard formats

@@ -191,7 +191,8 @@ def build_sim(root, traj=SIM_TRAJ, group="sim_3d"):
               "imu": len(mt), "lidar": 1, "steps": 4}
     (root / "sim_manifest.json").write_text(json.dumps({"license": "cc-by-4.0", "groups": [group], "trajectories": {
         traj: {"counts": counts, "group": group, "scenario": "orbital/cubesat/black", "duration_s": 0.7,
-               "goal_position_error_m": 0.02, "goal_orientation_error_deg": 0.6, "source_dir": "x"}}}))
+               "goal_position_error_m": 0.02, "goal_orientation_error_deg": 0.6,
+               "source_dir": "orbital_cubesat_black_approach_00000_20261015T234104_001_env000_ep0002"}}}))
 
 
 @pytest.fixture(scope="session")
